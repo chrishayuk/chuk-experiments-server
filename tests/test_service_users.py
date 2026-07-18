@@ -52,6 +52,23 @@ async def test_revoke_user_unknown_id_raises_not_found():
         await service.revoke_user(999999)
 
 
+async def test_revoke_user_refuses_to_revoke_the_last_admin():
+    """_dashboard_admin_user (conftest) always seeds exactly one active admin
+    per test — find it dynamically rather than hardcoding its email."""
+    users = await service.list_team_users()
+    only_admin = next(u for u in users if u.role == Scope.ADMIN)
+
+    with pytest.raises(service.ConflictError):
+        await service.revoke_user(only_admin.id)
+    assert await service.get_active_user_by_email(only_admin.email) is not None
+
+
+async def test_revoke_user_allows_revoking_an_admin_when_another_remains():
+    second_admin = await service.create_user("second-admin@example.com", Scope.ADMIN)
+    await service.revoke_user(second_admin.id)
+    assert await service.get_active_user_by_email("second-admin@example.com") is None
+
+
 async def test_revoke_user_cascades_to_their_api_keys():
     user = await service.create_user("owner@example.com", Scope.WRITE)
     identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)

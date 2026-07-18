@@ -852,15 +852,28 @@ async def create_user(email: str, role: Scope) -> AppUser:
 
 async def revoke_user(user_id: int) -> None:
     """Soft-revokes the user and cascades to their own API keys — a removed
-    collaborator shouldn't leave live credentials behind."""
+    collaborator shouldn't leave live credentials behind. Refuses to revoke
+    the last remaining active admin: that would leave the team with no one
+    able to sign in and manage users/keys through the dashboard at all
+    (short of the bearer-ADMIN CLI escape hatch, which isn't a substitute
+    for a real admin user)."""
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        row = await conn.fetchrow(
-            "UPDATE app_user SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id",
-            user_id,
+        target = await conn.fetchrow(
+            "SELECT role FROM app_user WHERE id = $1 AND revoked_at IS NULL", user_id
         )
-        if row is None:
+        if target is None:
             raise NotFoundError(f"No active user with id {user_id}")
+
+        if target["role"] == Scope.ADMIN.value:
+            remaining_admins = await conn.fetchval(
+                "SELECT count(*) FROM app_user WHERE role = 'admin' AND revoked_at IS NULL AND id != $1",
+                user_id,
+            )
+            if remaining_admins == 0:
+                raise ConflictError("Cannot revoke the last remaining admin user")
+
+        await conn.execute("UPDATE app_user SET revoked_at = now() WHERE id = $1", user_id)
         await conn.execute(
             "UPDATE api_key SET revoked_at = now() WHERE created_by_user_id = $1 AND revoked_at IS NULL",
             user_id,

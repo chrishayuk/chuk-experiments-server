@@ -472,6 +472,14 @@ async def test_users_item_revoke_cascades_their_keys(api_client, write_key):
     assert revoked_key["revoked_at"] is not None
 
 
+async def test_users_item_refuses_to_revoke_last_admin(api_client, write_key):
+    users_resp = await api_client.get("/v1/users", headers=_auth(write_key))
+    only_admin = next(u for u in users_resp.json() if u["role"] == "admin")
+
+    resp = await api_client.delete(f"/v1/users/{only_admin['id']}", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.CONFLICT
+
+
 async def test_keys_collection_rejects_scope_above_role_ceiling(api_client):
     cookies = await _cookie_for("capped-writer@example.com", "write")
     resp = await api_client.post("/v1/keys", json={"name": "too-much", "scopes": ["admin"]}, cookies=cookies)
