@@ -101,3 +101,11 @@ AUTHORIZATION_HEADER = "authorization"
 
 DEFAULT_HTTP_HOST = "0.0.0.0"  # noqa: S104 - intentional bind-all for containers
 DEFAULT_HTTP_PORT = 8000
+
+# --- R2 / object storage (spec §9) -------------------------------------------
+
+#: "Presigned URLs are short-lived (15 min PUT, 1 h GET)" — spec §9.
+PRESIGN_PUT_EXPIRY_SECONDS = 900
+PRESIGN_GET_EXPIRY_SECONDS = 3600
+R2_SIGNATURE_VERSION = "s3v4"
+R2_REGION = "auto"

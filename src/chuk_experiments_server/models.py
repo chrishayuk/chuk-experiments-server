@@ -178,6 +178,18 @@ class ArtifactCreate(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class ArtifactPresignRequest(BaseModel):
+    filename: str
+    kind: ArtifactKind = ArtifactKind.OTHER
+    content_type: str | None = None
+
+
+class ArtifactPresignResponse(BaseModel):
+    upload_url: str
+    uri: str
+    expires_in: int
+
+
 class Run(RecordModel):
     id: int
     slug: str

@@ -14,13 +14,15 @@ from http import HTTPStatus
 from typing import Any, Callable
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
-from . import auth, service
-from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, Scope
+from . import auth, service, storage
+from .config import settings
+from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, PRESIGN_PUT_EXPIRY_SECONDS, Scope
 from .errors import error_payload
 from .models import (
     ArtifactCreate,
+    ArtifactPresignRequest,
     ExperimentCreate,
     ExperimentUpdate,
     LeaseRenewal,
@@ -32,6 +34,8 @@ from .models import (
 )
 from .serialization import to_jsonable
 from .server import mcp
+
+_R2_NOT_CONFIGURED = {"error": "not_implemented", "detail": "R2 is not configured on this server"}
 
 
 def _ok(data: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
@@ -262,8 +266,10 @@ async def run_artifacts(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# Artifacts — R2 presign/download land in Phase 2; routes exist now so the
-# API surface matches the spec, but they report themselves as not implemented.
+# Artifacts — R2 presign/download (spec §4/§9). Reports itself as not
+# implemented if R2 secrets aren't set on this deployment, rather than
+# raising — a server without R2 configured should still serve everything
+# else normally.
 # ---------------------------------------------------------------------------
 
 
@@ -271,9 +277,17 @@ async def run_artifacts(request: Request) -> Response:
 @_with_error_handling
 async def run_artifacts_presign(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)
-    return JSONResponse(
-        {"error": "not_implemented", "detail": "R2 presigned uploads land in Phase 2"},
-        status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+    if not settings.r2_configured:
+        return JSONResponse(_R2_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    run_id = request.path_params["run_id"]
+    await service.get_run(run_id)  # 404s if the run doesn't exist
+    data = ArtifactPresignRequest.model_validate(await request.json())
+    key = f"runs/{run_id}/{data.kind.value}/{data.filename}"
+    upload_url = storage.presign_put(key, content_type=data.content_type)
+    return _ok(
+        {"upload_url": upload_url, "uri": storage.build_uri(key), "expires_in": PRESIGN_PUT_EXPIRY_SECONDS},
+        status=HTTPStatus.CREATED,
     )
 
 
@@ -281,7 +295,9 @@ async def run_artifacts_presign(request: Request) -> Response:
 @_with_error_handling
 async def artifact_download(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.READ)
-    return JSONResponse(
-        {"error": "not_implemented", "detail": "R2 presigned downloads land in Phase 2"},
-        status_code=HTTPStatus.NOT_IMPLEMENTED.value,
-    )
+    if not settings.r2_configured:
+        return JSONResponse(_R2_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    artifact = await service.get_artifact(request.path_params["artifact_id"])
+    download_url = storage.presign_get(storage.key_from_uri(artifact.uri))
+    return RedirectResponse(download_url, status_code=HTTPStatus.FOUND.value)

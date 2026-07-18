@@ -715,6 +715,17 @@ async def register_artifact(run_id: int, data: ArtifactCreate) -> Artifact:
     return Artifact.model_validate(dict(row))
 
 
+async def get_artifact(artifact_id: int) -> Artifact:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at FROM artifact WHERE id = $1",
+        artifact_id,
+    )
+    if row is None:
+        raise NotFoundError(f"No artifact with id {artifact_id}")
+    return Artifact.model_validate(dict(row))
+
+
 async def find_checkpoints(
     experiment: str | None = None,
     model: str | None = None,

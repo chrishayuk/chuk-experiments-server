@@ -71,6 +71,21 @@ async def test_register_artifact_missing_run_raises_not_found():
         await service.register_artifact(999999, ArtifactCreate(kind="checkpoint", uri="s3://x"))
 
 
+async def test_get_artifact_returns_registered_artifact():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    registered = await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+
+    fetched = await service.get_artifact(registered.id)
+    assert fetched.uri == "s3://bucket/ckpt.bin"
+    assert fetched.run_id == run.id
+
+
+async def test_get_artifact_missing_raises_not_found():
+    with pytest.raises(service.NotFoundError):
+        await service.get_artifact(999999)
+
+
 async def test_find_checkpoints_filters_by_model_and_kind():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0", config={"model": "v11"}))
