@@ -1,0 +1,67 @@
+name: Backup
+
+# Daily pg_dump of the production Neon database to R2, independent of
+# Neon's own point-in-time recovery window (only 6h on the free plan this
+# project is on — see history_retention_seconds — a real gap, not a proper
+# backup). BACKUP_DATABASE_URL is a separate secret from the app's own
+# DATABASE_URL (which only Fly holds) so this workflow doesn't need
+# production Fly access at all, just a direct Postgres connection string.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL 18 client tools
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+
+      - name: Dump database
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          date_stamp=$(date -u +%Y-%m-%dT%H%M%SZ)
+          backup_file="backup-${date_stamp}.sql.gz"
+          pg_dump "$BACKUP_DATABASE_URL" | gzip > "$backup_file"
+          echo "BACKUP_FILE=$backup_file" >> "$GITHUB_ENV"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "$BACKUP_FILE" "s3://${R2_BUCKET}/backups/$BACKUP_FILE" \
+            --endpoint-url "$R2_ENDPOINT_URL"
+
+      - name: Prune backups older than 30 days
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S)
+          keys=$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "backups/" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --query "Contents[?LastModified<='${cutoff}'].Key" --output text)
+          if [ -n "$keys" ] && [ "$keys" != "None" ]; then
+            echo "$keys" | tr '\t' '\n' | while read -r key; do
+              [ -n "$key" ] && aws s3 rm "s3://${R2_BUCKET}/$key" --endpoint-url "$R2_ENDPOINT_URL"
+            done
+          fi
