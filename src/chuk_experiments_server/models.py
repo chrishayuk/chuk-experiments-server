@@ -191,6 +191,18 @@ class ArtifactPresignRequest(BaseModel):
     content_type: str | None = None
 
 
+class ArtifactUploadRequest(BaseModel):
+    """Body for POST .../artifacts/upload — content travels through this
+    server (base64, in the JSON body) to Google Drive, unlike the R2
+    presign flow where bytes never transit this server at all. Intended
+    for small provenance/config/log/dataset files, not large checkpoints."""
+
+    filename: str
+    kind: ArtifactKind = ArtifactKind.OTHER
+    content_base64: str
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
 class ArtifactPresignResponse(BaseModel):
     upload_url: str
     uri: str

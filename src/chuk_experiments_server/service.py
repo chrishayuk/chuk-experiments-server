@@ -16,18 +16,22 @@ import asyncpg
 from .auth import AuthError, generate_key, hash_key
 from .constants import (
     CANCELLABLE_RUN_STATUSES,
+    DEFAULT_EXPERIMENT_ORDER,
+    DEFAULT_EXPERIMENT_SORT,
     DEFAULT_LEASE_SECONDS,
     DEFAULT_LIST_LIMIT,
     DEFAULT_MAX_CLAIM_ATTEMPTS,
     DEFAULT_SEARCH_LIMIT,
     EXPERIMENT_ID_PREFIX,
     EXPERIMENT_REF_SEQUENCE,
+    EXPERIMENT_SORT_COLUMNS,
     ID_SEQUENCE_PAD_WIDTH,
     LEASABLE_RUN_STATUSES,
     METRIC_OP_SQL,
     ROLE_SCOPE_CEILING,
     RUN_ID_PREFIX,
     RUN_REF_SEQUENCE,
+    VALID_ARTIFACT_URI_PREFIXES,
     MetricOp,
     RunStatus,
     Scope,
@@ -67,6 +71,12 @@ class NotFoundError(Exception):
 
 class ConflictError(Exception):
     """Raised when a state transition isn't valid from the run's current status."""
+
+
+class ValidationError(Exception):
+    """Input that parses fine at the Pydantic layer but fails a business-logic
+    check the model itself can't express (e.g. register_artifact's uri-scheme
+    check) — mapped to 422 by errors.py, same as a pydantic.ValidationError."""
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +148,14 @@ async def list_experiments(
     q: str | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
+    sort: str = DEFAULT_EXPERIMENT_SORT,
+    order: str = DEFAULT_EXPERIMENT_ORDER,
 ) -> list[ExperimentSummary]:
+    if sort not in EXPERIMENT_SORT_COLUMNS:
+        raise ValidationError(f"sort must be one of {sorted(EXPERIMENT_SORT_COLUMNS)}, got '{sort}'")
+    if order not in ("asc", "desc"):
+        raise ValidationError(f"order must be 'asc' or 'desc', got '{order}'")
+
     pool = await get_pool()
     params: list[Any] = []
 
@@ -158,6 +175,8 @@ async def list_experiments(
 
     limit_param = bind(limit)
     offset_param = bind(offset)
+    order_column = EXPERIMENT_SORT_COLUMNS[sort]
+    order_direction = order.upper()
 
     rows = await pool.fetch(
         f"""
@@ -166,7 +185,7 @@ async def list_experiments(
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
         WHERE {" AND ".join(where)}
-        ORDER BY e.updated_at DESC
+        ORDER BY {order_column} {order_direction}, e.id
         LIMIT {limit_param} OFFSET {offset_param}
         """,
         *params,
@@ -738,6 +757,14 @@ async def submit_result(run_id: str, submitted_by: str, data: ResultCreate) -> R
 
 
 async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
+    if not data.uri.startswith(VALID_ARTIFACT_URI_PREFIXES):
+        raise ValidationError(
+            f"Artifact uri '{data.uri}' isn't a real accessible location "
+            f"(expected one of {VALID_ARTIFACT_URI_PREFIXES}). Local file bytes go through "
+            "upload_artifact_to_drive (small config/log/dataset files) or the R2 presign flow "
+            "(POST /v1/runs/{run_id}/artifacts/presign, for large checkpoints) — never a local "
+            "file:// path or bare filesystem path, which nobody else can resolve."
+        )
     pool = await get_pool()
     run_exists = await pool.fetchval("SELECT 1 FROM run WHERE id = $1", run_id)
     if not run_exists:

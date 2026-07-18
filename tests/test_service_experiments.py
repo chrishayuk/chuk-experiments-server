@@ -92,6 +92,24 @@ async def test_list_experiments_filters_by_tag():
     assert [e.slug for e in tagged] == ["cn-7"]
 
 
+async def test_list_experiments_sorts_by_title_ascending():
+    await service.create_experiment(_experiment_create(slug="cn-b", title="B experiment"))
+    await service.create_experiment(_experiment_create(slug="cn-a", title="A experiment"))
+
+    ascending = await service.list_experiments(sort="title", order="asc")
+    assert [e.slug for e in ascending] == ["cn-a", "cn-b"]
+
+
+async def test_list_experiments_rejects_unknown_sort_column():
+    with pytest.raises(service.ValidationError):
+        await service.list_experiments(sort="not_a_real_column")
+
+
+async def test_list_experiments_rejects_invalid_order():
+    with pytest.raises(service.ValidationError):
+        await service.list_experiments(order="sideways")
+
+
 async def test_search_experiments_full_text_ranks_relevant_first():
     await service.create_experiment(
         _experiment_create(

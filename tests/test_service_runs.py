@@ -81,6 +81,29 @@ async def test_register_artifact_missing_run_raises_not_found():
         )
 
 
+async def test_register_artifact_rejects_file_uri():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    with pytest.raises(service.ValidationError):
+        await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="file:///tmp/x.txt"))
+
+
+async def test_register_artifact_rejects_bare_local_path():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    with pytest.raises(service.ValidationError):
+        await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="/tmp/x.txt"))
+
+
+async def test_register_artifact_accepts_gdrive_and_https_uris():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    gdrive = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc123"))
+    https = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="https://example.com/x"))
+    assert gdrive.uri == "gdrive://abc123"
+    assert https.uri == "https://example.com/x"
+
+
 async def test_get_artifact_returns_registered_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))

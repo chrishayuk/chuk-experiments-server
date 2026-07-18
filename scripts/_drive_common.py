@@ -1,8 +1,11 @@
-"""Shared helpers for the archive_*_to_drive.py scripts — Google Drive auth,
-folder/file upload, and a local manifest for resumable reruns. Mirrors
-_migrate_common.py's role for the migrate_*.py scripts.
+"""Shared helpers for the archive_*_to_drive.py scripts — a local manifest
+for resumable reruns, plus directory-walk upload/verify built on top of
+chuk_experiments_server.drive_storage's Drive auth/folder helpers (shared
+with the live server's own upload endpoint, so there's exactly one
+implementation of "how we talk to Drive", not two that could drift).
+Mirrors _migrate_common.py's role for the migrate_*.py scripts.
 
-Requires the `archive` extra: `uv sync --extra archive`.
+google-auth/google-api-python-client are regular project dependencies now (drive_storage.py is a core server module), so a normal dev install already has them.
 """
 
 from __future__ import annotations
@@ -13,63 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request as GoogleAuthRequest
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-#: drive.file only — the app can see/manage files it creates itself, never
-#: the rest of the user's Drive.
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-
-#: Folders are looked up by (name, parent) rather than relying on a
-#: uniqueness constraint — Drive doesn't enforce one, unlike a filesystem.
-_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
-
-
-def get_drive_service(client_id: str, client_secret: str, refresh_token: str):
-    """Builds a Drive v3 service directly from an already-minted refresh
-    token — reuses gpu-training-harness's existing OAuth client (see that
-    project's scripts/authorize-drive.py) rather than registering a new
-    one, so there's no interactive consent step: the token's already
-    authorized, just needs a fresh access token off the back of it."""
-    creds = Credentials(
-        token=None,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=client_id,
-        client_secret=client_secret,
-        scopes=DRIVE_SCOPES,
-    )
-    creds.refresh(GoogleAuthRequest())
-    return build("drive", "v3", credentials=creds)
-
-
-def ensure_folder(service, name: str, parent_id: str | None) -> str:
-    """Get-or-create a Drive folder by name under a parent, returning its id."""
-    query = f"name = '{name}' and mimeType = '{_FOLDER_MIME_TYPE}' and trashed = false"
-    if parent_id:
-        query += f" and '{parent_id}' in parents"
-    results = service.files().list(q=query, fields="files(id, name)").execute()
-    existing = results.get("files", [])
-    if existing:
-        return existing[0]["id"]
-
-    metadata: dict[str, Any] = {"name": name, "mimeType": _FOLDER_MIME_TYPE}
-    if parent_id:
-        metadata["parents"] = [parent_id]
-    created = service.files().create(body=metadata, fields="id").execute()
-    return created["id"]
-
-
-def ensure_folder_path(service, root_id: str, parts: tuple[str, ...]) -> str:
-    """ensure_folder, applied down a chain of path components — e.g.
-    ("chuk-mlx", "cot_vocab_alignment", "checkpoints") under the archive
-    root, creating each level as needed."""
-    folder_id = root_id
-    for part in parts:
-        folder_id = ensure_folder(service, part, folder_id)
-    return folder_id
+from chuk_experiments_server.drive_storage import (  # noqa: F401 - re-exported for script callers
+    DRIVE_SCOPES,
+    ensure_folder,
+    ensure_folder_path,
+    get_drive_service,
+)
 
 
 def upload_file(service, local_path: Path, parent_id: str) -> str:

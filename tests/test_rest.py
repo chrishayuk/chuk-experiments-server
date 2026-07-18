@@ -106,6 +106,22 @@ async def test_list_experiments_filters_by_programme(api_client, write_key):
     assert [e["slug"] for e in resp.json()] == ["div-3"]
 
 
+async def test_list_experiments_sort_title_ascending(api_client, write_key):
+    await _create_experiment(api_client, write_key, slug="cn-b", title="B experiment")
+    await _create_experiment(api_client, write_key, slug="cn-a", title="A experiment")
+
+    resp = await api_client.get(
+        "/v1/experiments", params={"sort": "title", "order": "asc"}, headers=_auth(write_key)
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert [e["slug"] for e in resp.json()] == ["cn-a", "cn-b"]
+
+
+async def test_list_experiments_rejects_unknown_sort_column(api_client, write_key):
+    resp = await api_client.get("/v1/experiments", params={"sort": "nope"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 async def test_append_writeup(api_client, write_key):
     await _create_experiment(api_client, write_key)
     resp = await api_client.post(
@@ -279,6 +295,79 @@ async def test_artifacts_presign_configured(api_client, write_key, monkeypatch):
     body = resp.json()
     assert body["upload_url"] == f"https://fake-r2/runs/{run_id}/checkpoint/x.bin"
     assert body["uri"] == f"s3://{settings.r2_bucket}/runs/{run_id}/checkpoint/x.bin"
+
+
+async def test_artifacts_upload_not_configured(api_client, write_key, monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: False))
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload",
+        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8="},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
+
+
+async def test_artifacts_upload_configured_success(api_client, write_key, monkeypatch):
+    """drive_storage's actual Drive-API calls aren't exercised here (that's
+    real OAuth/Drive-credential territory, not this route's job) — mocked
+    so the test is deterministic in CI, where no Drive secrets are set."""
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    monkeypatch.setattr(
+        drive_storage, "upload_bytes", lambda service, filename, content, parent_id: "fake-file-id"
+    )
+
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload",
+        json={"filename": "tokenizer_bench.py", "kind": "other", "content_base64": "aGVsbG8="},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["uri"] == "gdrive://fake-file-id"
+    assert body["meta"]["source_path"] == "tokenizer_bench.py"
+    assert "drive_url" in body["meta"]
+
+
+async def test_artifacts_upload_rejects_invalid_base64(api_client, write_key, monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload",
+        json={"filename": "x.txt", "kind": "other", "content_base64": "not-valid-base64!!!"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_rejects_oversized_content(api_client, write_key, monkeypatch):
+    from chuk_experiments_server import rest
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(rest, "_MAX_UPLOAD_BYTES", 4)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload",
+        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8="},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
 
 
 async def test_artifact_download_configured_redirects(api_client, write_key, monkeypatch):

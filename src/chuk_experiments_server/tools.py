@@ -255,15 +255,61 @@ async def register_artifact(
 ) -> Any:
     """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for a run.
 
+    A run typically accumulates several kinds of artifact over its life: the
+    harness/code that ran (custom, or a standard one you already know how to
+    invoke), its input files (datasets, configs), its output files (logs,
+    reports, metrics), and the write-up at the end. Temp/scratch files used
+    only during execution generally aren't worth registering at all — only
+    things someone (human or agent) might later need to fetch back.
+
+    uri MUST already be a real, reachable location — s3://, gdrive://, or
+    https://. NEVER a local file:// path or bare filesystem path: nobody
+    else (not this dashboard, not a future agent, not you in a new session)
+    can resolve a path on your own machine. If you have local file bytes to
+    attach, call upload_artifact_to_drive instead — it uploads the content
+    and registers the resulting gdrive:// artifact in one step. For large
+    files (checkpoints, multi-MB+), use the presign flow
+    (POST /v1/runs/{run_id}/artifacts/presign) instead of either — bytes
+    should go straight to R2, not through this server.
+
     Args:
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
-        uri: Storage URI (s3://... or file://...)
+        uri: Storage URI already reachable — s3://..., gdrive://..., or https://...
         sha256: Content hash, if known
         meta: Additional metadata (step, epoch, format, ...)
     """
     body = {"kind": kind, "uri": uri, "sha256": sha256, "meta": meta or {}}
     return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+
+
+@mcp.tool
+async def upload_artifact_to_drive(
+    run_id: str,
+    filename: str,
+    kind: str,
+    content_base64: str,
+    meta: dict[str, Any] | None = None,
+) -> Any:
+    """Upload local file content straight to Google Drive and register the
+    resulting gdrive:// artifact for a run, in one step — use this whenever
+    you have actual bytes (a harness script, a small dataset, a config/pin
+    file, a log or report) rather than a URI that's already reachable.
+
+    Intended for small-to-moderate provenance/config/log/dataset files, not
+    multi-MB+ checkpoints — those should go through the R2 presign flow
+    instead (POST /v1/runs/{run_id}/artifacts/presign), which never routes
+    bytes through this server at all.
+
+    Args:
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
+        filename: Name to give the file in Drive (e.g. "tokenizer_bench.py")
+        kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
+        content_base64: The file's raw bytes, base64-encoded
+        meta: Additional metadata (role, step, format, ...)
+    """
+    body = {"filename": filename, "kind": kind, "content_base64": content_base64, "meta": meta or {}}
+    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts/upload", json=body)
 
 
 @mcp.tool

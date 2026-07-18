@@ -89,7 +89,19 @@
     border-radius: 8px;
   }
   button:hover, .button:hover { text-decoration: none; filter: brightness(1.1); }
-  form.filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+  .filters { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+  .filters form { display: inline-flex; gap: .4rem; }
+
+  .chip-row { display: flex; gap: .35rem; flex-wrap: wrap; }
+  .chip-filter {
+    display: inline-flex; align-items: center; font-size: .8rem; padding: .3rem .75rem;
+    border-radius: 999px; border: 1px solid var(--ring2); color: var(--ink2); background: var(--surface);
+  }
+  .chip-filter:hover { text-decoration: none; background: var(--surface2); }
+  .chip-filter.active { border-color: var(--accent); color: var(--ink); background: var(--surface2); }
+
+  th a { color: inherit; }
+  th a:hover { text-decoration: underline; }
 
   .pager { display: flex; align-items: center; gap: .9rem; margin: .9rem 0; font-size: .85rem; }
   .pager span.muted { font-family: var(--mono); }
@@ -200,15 +212,31 @@ function experimentRow(e){
 /* ---------------- experiments list ---------------- */
 const EXPERIMENT_STATUSES=["draft","planned","running","completed","abandoned","superseded"];
 
+/* Mirrors constants.DEFAULT_EXPERIMENT_SORT/DEFAULT_EXPERIMENT_ORDER — kept
+   in sync by hand. Clicking an inactive column sorts it ascending; clicking
+   the already-active column flips direction. */
+function sortHeader(basePath,params,column,label){
+  const currentSort=params.get("sort")||"updated_at";
+  const currentOrder=params.get("order")||"desc";
+  const isActive=currentSort===column;
+  const nextOrder=isActive&&currentOrder==="asc"?"desc":"asc";
+  const p=new URLSearchParams(params);
+  p.set("sort",column);p.set("order",nextOrder);p.delete("offset");
+  const arrow=isActive?(currentOrder==="asc"?" ▲":" ▼"):"";
+  return `<a href="#${basePath}?${p}">${esc(label)}${arrow}</a>`;
+}
+
 async function loadExperimentsList(params){
   const programme=params.get("programme")||"";
   const status=params.get("status")||"";
   const tag=params.get("tag")||"";
+  const sort=params.get("sort")||"updated_at";
+  const order=params.get("order")||"desc";
   const offset=Math.max(0,parseInt(params.get("offset")||"0",10)||0);
 
   let experiments,programmes;
   try{
-    const apiParams=new URLSearchParams({limit:String(PAGE_SIZE+1),offset:String(offset)});
+    const apiParams=new URLSearchParams({limit:String(PAGE_SIZE+1),offset:String(offset),sort,order});
     if(programme)apiParams.set("programme",programme);
     if(status)apiParams.set("status",status);
     if(tag)apiParams.set("tag",tag);
@@ -218,34 +246,59 @@ async function loadExperimentsList(params){
   const hasMore=experiments.length>PAGE_SIZE;
   experiments=experiments.slice(0,PAGE_SIZE);
 
-  const progOptions=programmes.map(p=>`<option value="${esc(p.slug)}" ${p.slug===programme?"selected":""}>${esc(p.name)}</option>`).join("");
-  const statusOptions=EXPERIMENT_STATUSES.map(s=>`<option value="${s}" ${s===status?"selected":""}>${s}</option>`).join("");
   const rows=experiments.map(e=>`<tr><td><a href="#/experiments/${encodeURIComponent(e.slug)}">${esc(e.title)}</a></td><td>${esc(e.programme_slug)}</td><td>${pill(e.status)}</td><td>${(e.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</td><td class="muted">${fmtDt(e.updated_at)}</td></tr>`).join("")
     ||`<tr><td colspan="5" class="empty">No experiments match these filters</td></tr>`;
 
-  const baseParams=new URLSearchParams();
-  if(programme)baseParams.set("programme",programme);
-  if(status)baseParams.set("status",status);
-  if(tag)baseParams.set("tag",tag);
+  /* Everything except offset — shared by sort headers and the pager
+     (pagerHtml adds its own offset on top). */
+  const sortParams=new URLSearchParams();
+  if(programme)sortParams.set("programme",programme);
+  if(status)sortParams.set("status",status);
+  if(tag)sortParams.set("tag",tag);
+  sortParams.set("sort",sort);sortParams.set("order",order);
+
+  const statusChips=[["","all"]].concat(EXPERIMENT_STATUSES.map(s=>[s,s])).map(([value,label])=>{
+    const p=new URLSearchParams(sortParams);
+    p.delete("status");p.delete("offset");
+    if(value)p.set("status",value);
+    return `<a class="chip-filter${value===status?" active":""}" href="#/experiments?${p}">${esc(label)}</a>`;
+  }).join("");
+
+  const progOptions=programmes.map(p=>`<option value="${esc(p.slug)}" ${p.slug===programme?"selected":""}>${esc(p.name)}</option>`).join("");
 
   $("#app").innerHTML=`
     <h2>Experiments</h2>
-    <form class="filters" id="filter-form">
-      <select name="programme"><option value="">All programmes</option>${progOptions}</select>
-      <select name="status"><option value="">Any status</option>${statusOptions}</select>
-      <input type="text" name="tag" placeholder="tag" value="${esc(tag)}">
-      <button type="submit">Filter</button>
+    <div class="filters">
+      <div class="chip-row" id="status-chips">${statusChips}</div>
+      <select id="programme-select"><option value="">All programmes</option>${progOptions}</select>
+      <form id="tag-form">
+        <input type="text" name="tag" placeholder="tag" value="${esc(tag)}">
+        <button type="submit">Go</button>
+      </form>
       ${(programme||status||tag)?`<a href="#/experiments">Clear</a>`:""}
-    </form>
-    <table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Tags</th><th>Updated</th></tr>${rows}</table>
-    ${pagerHtml("/experiments",baseParams,offset,experiments.length,hasMore)}
+    </div>
+    <table><tr>
+      <th>${sortHeader("/experiments",sortParams,"title","Experiment")}</th>
+      <th>${sortHeader("/experiments",sortParams,"programme_slug","Programme")}</th>
+      <th>${sortHeader("/experiments",sortParams,"status","Status")}</th>
+      <th>Tags</th>
+      <th>${sortHeader("/experiments",sortParams,"updated_at","Updated")}</th>
+    </tr>${rows}</table>
+    ${pagerHtml("/experiments",sortParams,offset,experiments.length,hasMore)}
   `;
-  $("#filter-form").addEventListener("submit",ev=>{
+  $("#programme-select").addEventListener("change",ev=>{
+    const p=new URLSearchParams(sortParams);
+    p.delete("offset");
+    if(ev.target.value)p.set("programme",ev.target.value);else p.delete("programme");
+    location.hash="#/experiments?"+p;
+  });
+  $("#tag-form").addEventListener("submit",ev=>{
     ev.preventDefault();
-    const fd=new FormData(ev.target);
-    const p=new URLSearchParams();
-    for(const [k,v] of fd.entries())if(v)p.set(k,v);
-    location.hash="#/experiments"+(p.toString()?"?"+p:"");
+    const v=new FormData(ev.target).get("tag");
+    const p=new URLSearchParams(sortParams);
+    p.delete("offset");
+    if(v)p.set("tag",v);else p.delete("tag");
+    location.hash="#/experiments?"+p;
   });
 }
 

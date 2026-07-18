@@ -7,7 +7,7 @@ from typing import Any
 import pydantic
 
 from .auth import AuthError
-from .service import ConflictError, NotFoundError
+from .service import ConflictError, NotFoundError, ValidationError
 
 
 def error_payload(exc: Exception) -> tuple[HTTPStatus, dict[str, Any]]:
@@ -19,6 +19,8 @@ def error_payload(exc: Exception) -> tuple[HTTPStatus, dict[str, Any]]:
         return HTTPStatus.NOT_FOUND, {"error": str(exc)}
     if isinstance(exc, ConflictError):
         return HTTPStatus.CONFLICT, {"error": str(exc)}
+    if isinstance(exc, ValidationError):
+        return HTTPStatus.UNPROCESSABLE_ENTITY, {"error": str(exc)}
     if isinstance(exc, pydantic.ValidationError):
         return HTTPStatus.UNPROCESSABLE_ENTITY, {"error": "validation_error", "detail": exc.errors()}
     return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal_error"}

@@ -17,6 +17,9 @@ def blank_settings(monkeypatch):
         "R2_ENDPOINT_URL",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
+        "GOOGLE_DRIVE_CLIENT_ID",
+        "GOOGLE_DRIVE_CLIENT_SECRET",
+        "GOOGLE_DRIVE_REFRESH_TOKEN",
         "GOOGLE_CLIENT_ID",
         "GOOGLE_CLIENT_SECRET",
         "GOOGLE_REDIRECT_URI",
@@ -66,6 +69,20 @@ def test_r2_configured_true_when_all_four_set(blank_settings, monkeypatch):
     monkeypatch.setenv("R2_ACCESS_KEY_ID", "id")
     monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "secret")
     assert blank_settings.r2_configured is True
+
+
+def test_google_drive_properties_default_to_none_and_not_configured(blank_settings):
+    assert blank_settings.google_drive_client_id is None
+    assert blank_settings.google_drive_client_secret is None
+    assert blank_settings.google_drive_refresh_token is None
+    assert blank_settings.google_drive_configured is False
+
+
+def test_google_drive_configured_true_when_all_three_set(blank_settings, monkeypatch):
+    monkeypatch.setenv("GOOGLE_DRIVE_CLIENT_ID", "id")
+    monkeypatch.setenv("GOOGLE_DRIVE_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("GOOGLE_DRIVE_REFRESH_TOKEN", "token")
+    assert blank_settings.google_drive_configured is True
 
 
 def test_dashboard_auth_configured_false_when_incomplete(blank_settings, monkeypatch):

@@ -9,6 +9,8 @@ therefore registered ONCE with `methods=[...]` and dispatch on
 `request.method` inside a single handler.
 """
 
+import base64
+import binascii
 from functools import wraps
 from http import HTTPStatus
 from typing import Any, Callable
@@ -16,9 +18,11 @@ from typing import Any, Callable
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
-from . import auth, service, storage
+from . import auth, drive_storage, service, storage
 from .config import settings
 from .constants import (
+    DEFAULT_EXPERIMENT_ORDER,
+    DEFAULT_EXPERIMENT_SORT,
     DEFAULT_LIST_LIMIT,
     DEFAULT_SEARCH_LIMIT,
     GDRIVE_URI_PREFIX,
@@ -31,6 +35,7 @@ from .models import (
     AppUserCreate,
     ArtifactCreate,
     ArtifactPresignRequest,
+    ArtifactUploadRequest,
     ExperimentCreate,
     ExperimentUpdate,
     LeaseRenewal,
@@ -44,6 +49,14 @@ from .serialization import to_jsonable
 from .server import mcp
 
 _R2_NOT_CONFIGURED = {"error": "not_implemented", "detail": "R2 is not configured on this server"}
+_DRIVE_NOT_CONFIGURED = {
+    "error": "not_implemented",
+    "detail": "Google Drive is not configured on this server",
+}
+#: Small provenance/config/log/dataset files only — content travels through
+#: this server as base64 in the request body, unlike R2's presign flow
+#: (bytes never transit the server at all). Large files belong in R2.
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
 def _ok(data: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
@@ -92,6 +105,8 @@ async def experiments_collection(request: Request) -> Response:
             q=params.get("q"),
             limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
             offset=int(params.get("offset", 0)),
+            sort=params.get("sort", DEFAULT_EXPERIMENT_SORT),
+            order=params.get("order", DEFAULT_EXPERIMENT_ORDER),
         )
         return _ok(experiments)
 
@@ -343,6 +358,46 @@ async def run_artifacts_presign(request: Request) -> Response:
         {"upload_url": upload_url, "uri": storage.build_uri(key), "expires_in": PRESIGN_PUT_EXPIRY_SECONDS},
         status=HTTPStatus.CREATED,
     )
+
+
+@mcp.endpoint("/v1/runs/{run_id}/artifacts/upload", methods=["POST"])
+@_with_error_handling
+async def run_artifacts_upload(request: Request) -> Response:
+    """Content travels through this server as base64 (unlike the R2 presign
+    flow, where bytes never transit it at all) and gets uploaded straight to
+    Google Drive — for small provenance/config/log/dataset files an agent
+    has bytes for right now, not large checkpoints (those belong in R2)."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    if not settings.google_drive_configured:
+        return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    run_id = request.path_params["run_id"]
+    run = await service.get_run(run_id)  # 404s if the run doesn't exist
+    data = ArtifactUploadRequest.model_validate(await request.json())
+
+    try:
+        content = base64.b64decode(data.content_base64, validate=True)
+    except binascii.Error:
+        return JSONResponse(
+            {"error": "content_base64 is not valid base64"}, status_code=HTTPStatus.BAD_REQUEST.value
+        )
+    if len(content) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"content exceeds {_MAX_UPLOAD_BYTES} bytes — use the R2 presign flow for large files"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
+    drive_client = drive_storage.get_client()
+    root_id = drive_storage.ensure_folder(drive_client, drive_storage.ARCHIVE_ROOT_NAME, None)
+    parent_id = drive_storage.ensure_folder_path(drive_client, root_id, (run.experiment_slug, run_id))
+    file_id = drive_storage.upload_bytes(drive_client, data.filename, content, parent_id)
+
+    artifact_data = ArtifactCreate(
+        kind=data.kind,
+        uri=f"{GDRIVE_URI_PREFIX}{file_id}",
+        meta={"drive_url": drive_storage.drive_url(file_id), "source_path": data.filename, **data.meta},
+    )
+    return _ok(await service.register_artifact(run_id, artifact_data), status=HTTPStatus.CREATED)
 
 
 @mcp.endpoint("/v1/artifacts/{artifact_id:int}/download", methods=["GET"])

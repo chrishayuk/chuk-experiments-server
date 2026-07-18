@@ -98,6 +98,19 @@ DEFAULT_LIST_LIMIT = 50
 DEFAULT_SEARCH_LIMIT = 20
 MAX_LIST_LIMIT = 500
 
+#: list_experiments' sort param, allow-listed against real SQL column
+#: expressions — never interpolate a caller-supplied column name directly,
+#: same defensive pattern as METRIC_OP_SQL for search's metric operator.
+EXPERIMENT_SORT_COLUMNS: dict[str, str] = {
+    "title": "e.title",
+    "status": "e.status",
+    "created_at": "e.created_at",
+    "updated_at": "e.updated_at",
+    "programme_slug": "p.slug",
+}
+DEFAULT_EXPERIMENT_SORT = "updated_at"
+DEFAULT_EXPERIMENT_ORDER = "desc"
+
 # --- Queue -------------------------------------------------------------
 
 #: Lease duration granted by a claim/renewal when the caller doesn't specify one.
@@ -159,6 +172,14 @@ R2_REGION = "auto"
 #: scripts/archive_*_to_drive.py — pointer/scheme-agnostic alongside R2's
 #: s3:// scheme, per ROADMAP.md's Google Drive archival phase.
 GDRIVE_URI_PREFIX = "gdrive://"
+
+#: register_artifact only accepts a uri that's already reachable in real
+#: storage — never a local file:// path or bare filesystem path, which is
+#: meaningless to anyone but the exact machine that registered it (and
+#: un-downloadable through /v1/artifacts/{id}/download). Local bytes go
+#: through upload_artifact_to_drive (small files) or the R2 presign flow
+#: (large checkpoints) instead — both hand back one of these prefixes.
+VALID_ARTIFACT_URI_PREFIXES = ("s3://", GDRIVE_URI_PREFIX, "https://", "http://")
 
 # --- Dashboard auth (spec §8/§9 "website behind ... the read key") -----------
 # "Sign in with Google", restricted to one email — a browser session, not the

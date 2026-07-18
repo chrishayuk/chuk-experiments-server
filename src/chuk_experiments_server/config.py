@@ -66,6 +66,33 @@ class Settings:
             self.r2_bucket and self.r2_endpoint_url and self.r2_access_key_id and self.r2_secret_access_key
         )
 
+    # --- Google Drive artifact storage ---------------------------------------
+    # For artifacts an agent has bytes for right now (config/log/small dataset
+    # files) rather than something already sitting in R2 — see
+    # drive_storage.py. Reuses gpu-training-harness's existing OAuth client +
+    # a drive.file-scoped refresh token, same credentials the standalone
+    # archive_*_to_drive.py scripts already use locally.
+
+    @property
+    def google_drive_client_id(self) -> str | None:
+        return os.environ.get("GOOGLE_DRIVE_CLIENT_ID")
+
+    @property
+    def google_drive_client_secret(self) -> str | None:
+        return os.environ.get("GOOGLE_DRIVE_CLIENT_SECRET")
+
+    @property
+    def google_drive_refresh_token(self) -> str | None:
+        return os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN")
+
+    @property
+    def google_drive_configured(self) -> bool:
+        return bool(
+            self.google_drive_client_id
+            and self.google_drive_client_secret
+            and self.google_drive_refresh_token
+        )
+
     # --- Dashboard auth (Phase 4) --------------------------------------------
     # Reuses chuk-mcp-stage's Google OAuth client (same Client ID/Secret) —
     # its authorized redirect URIs just need this server's callback URL added

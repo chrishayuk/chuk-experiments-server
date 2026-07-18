@@ -10,7 +10,7 @@ no matching DB record (no EXPERIMENT.md/RESULTS.md/README.md, excluded by
 migrate_chuk_mlx.py's discover_experiments filter) — archived anyway, just
 without artifact registration.
 
-Requires the `archive` extra: `uv sync --extra archive`.
+google-auth/google-api-python-client are regular project dependencies now (drive_storage.py is a core server module), so a normal dev install already has them.
 """
 
 import argparse

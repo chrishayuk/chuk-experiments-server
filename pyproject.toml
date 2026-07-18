@@ -29,6 +29,12 @@ dependencies = [
     "jinja2>=3.1.0",
     "markdown>=3.6",
     "bleach>=6.1.0",
+    # Google Drive artifact storage (drive_storage.py) — the running server
+    # imports this unconditionally (POST /v1/runs/{run_id}/artifacts/upload),
+    # not just the standalone scripts/archive_*_to_drive.py migration
+    # scripts, so these are real runtime deps, not an optional extra.
+    "google-auth>=2.23.0",
+    "google-api-python-client>=2.100.0",
 ]
 
 [project.optional-dependencies]
@@ -37,13 +43,6 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=5.0.0",
     "ruff>=0.3.0",
-]
-# Only needed for the one-off scripts/archive_*_to_drive.py migration
-# scripts, not the running server — kept out of the base dependency list
-# so the deployed image doesn't carry Google API client libraries.
-archive = [
-    "google-auth>=2.23.0",
-    "google-api-python-client>=2.100.0",
 ]
 
 [project.scripts]

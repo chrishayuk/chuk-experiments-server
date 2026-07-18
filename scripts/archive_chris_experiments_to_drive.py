@@ -21,7 +21,7 @@ never referenced in INDEX.md at all — archived anyway (so nothing is lost
 once the disk is later reclaimed) but skip the register_artifact step,
 since there's no experiment to attach to.
 
-Requires the `archive` extra: `uv sync --extra archive`.
+google-auth/google-api-python-client are regular project dependencies now (drive_storage.py is a core server module), so a normal dev install already has them.
 """
 
 import argparse
