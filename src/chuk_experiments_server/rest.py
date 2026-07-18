@@ -1,0 +1,287 @@
+"""REST surface (spec §4). Each handler: check scope, validate body into a
+Pydantic model, call `service`, return the result. All error translation goes
+through `errors.error_payload` so REST and MCP report failures the same way.
+
+chuk-mcp-server's endpoint registry keys routes by path string alone (not
+path+method), so two `@mcp.endpoint` calls for the same path silently
+overwrite each other. Routes that need more than one HTTP method are
+therefore registered ONCE with `methods=[...]` and dispatch on
+`request.method` inside a single handler.
+"""
+
+from functools import wraps
+from http import HTTPStatus
+from typing import Any, Callable
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from . import auth, service
+from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, Scope
+from .errors import error_payload
+from .models import (
+    ArtifactCreate,
+    ExperimentCreate,
+    ExperimentUpdate,
+    LeaseRenewal,
+    QueueClaimRequest,
+    ResultCreate,
+    RunCreate,
+    RunUpdate,
+    WriteupCreate,
+)
+from .serialization import to_jsonable
+from .server import mcp
+
+
+def _ok(data: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
+    return JSONResponse(to_jsonable(data), status_code=status.value)
+
+
+def _with_error_handling(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
+    @wraps(handler)
+    async def wrapped(request: Request) -> Response:
+        try:
+            return await handler(request)
+        except Exception as exc:  # translated uniformly via error_payload
+            status, body = error_payload(exc)
+            return JSONResponse(body, status_code=status.value)
+
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
+# Programmes
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/programmes", methods=["GET"])
+@_with_error_handling
+async def programmes_collection(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return _ok(await service.list_programmes())
+
+
+# ---------------------------------------------------------------------------
+# Experiments
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/experiments", methods=["GET", "POST"])
+@_with_error_handling
+async def experiments_collection(request: Request) -> Response:
+    if request.method == "GET":
+        await auth.require_scope_from_request(request, Scope.READ)
+        params = request.query_params
+        experiments = await service.list_experiments(
+            programme=params.get("programme"),
+            status=params.get("status"),
+            tags=params.getlist("tag") or None,
+            q=params.get("q"),
+            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
+            offset=int(params.get("offset", 0)),
+        )
+        return _ok(experiments)
+
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    data = ExperimentCreate.model_validate(await request.json())
+    return _ok(await service.create_experiment(data), status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/experiments/{slug}", methods=["GET", "PATCH"])
+@_with_error_handling
+async def experiment_detail(request: Request) -> Response:
+    slug = request.path_params["slug"]
+    if request.method == "GET":
+        await auth.require_scope_from_request(request, Scope.READ)
+        return _ok(await service.get_experiment(slug))
+
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    data = ExperimentUpdate.model_validate(await request.json())
+    return _ok(await service.update_experiment(slug, data))
+
+
+@mcp.endpoint("/v1/experiments/{slug}/writeups", methods=["POST"])
+@_with_error_handling
+async def experiment_writeups(request: Request) -> Response:
+    key = await auth.require_scope_from_request(request, Scope.WRITE)
+    slug = request.path_params["slug"]
+    data = WriteupCreate.model_validate(await request.json())
+    return _ok(await service.append_writeup(slug, key.name, data), status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/experiments/{slug}/runs", methods=["POST"])
+@_with_error_handling
+async def experiment_runs(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    slug = request.path_params["slug"]
+    body = await request.json()
+    body["experiment"] = slug
+    data = RunCreate.model_validate(body)
+    return _ok(await service.enqueue_run(data), status=HTTPStatus.CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Search / index
+# ---------------------------------------------------------------------------
+
+_CONFIG_QUERY_PREFIX = "config."
+
+
+@mcp.endpoint("/v1/search", methods=["GET"])
+@_with_error_handling
+async def search(request: Request) -> Response:
+    """FTS (`q`) combinable with structured filters (spec §5a):
+    `programme`, `status`, `tag` (repeatable), `metric`+`op`+`value`, and one
+    `config.<key>=<value>` JSONB predicate. At least one of `q` or a filter
+    must be given."""
+    await auth.require_scope_from_request(request, Scope.READ)
+    params = request.query_params
+    query = params.get("q")
+
+    config_key = None
+    config_value = None
+    for key in params.keys():
+        if key.startswith(_CONFIG_QUERY_PREFIX):
+            config_key = key[len(_CONFIG_QUERY_PREFIX) :]
+            config_value = params[key]
+            break
+
+    metric, op, value = params.get("metric"), params.get("op"), params.get("value")
+    tags = params.getlist("tag") or None
+
+    if not any((query, params.get("programme"), params.get("status"), tags, config_key, metric)):
+        return JSONResponse(
+            {"error": "provide at least one of: q, programme, status, tag, config.<key>, metric+op+value"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
+    return _ok(
+        await service.search_experiments(
+            query=query,
+            programme=params.get("programme"),
+            status=params.get("status"),
+            tags=tags,
+            config_key=config_key,
+            config_value=config_value,
+            metric=metric,
+            metric_op=op,
+            metric_value=float(value) if value is not None else None,
+            limit=int(params.get("limit", DEFAULT_SEARCH_LIMIT)),
+        )
+    )
+
+
+@mcp.endpoint("/v1/index", methods=["GET"])
+@_with_error_handling
+async def index(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return _ok(await service.get_index())
+
+
+# ---------------------------------------------------------------------------
+# Queue (spec §6a) — the harness's side of the contract
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/queue", methods=["GET"])
+@_with_error_handling
+async def queue_peek(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    params = request.query_params
+    max_seconds = params.get("max_seconds")
+    return _ok(
+        await service.peek_queue(
+            backend=params.get("backend"),
+            max_seconds=int(max_seconds) if max_seconds is not None else None,
+            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
+        )
+    )
+
+
+@mcp.endpoint("/v1/queue/claim", methods=["POST"])
+@_with_error_handling
+async def queue_claim(request: Request) -> Response:
+    key = await auth.require_scope_from_request(request, Scope.WRITE)
+    data = QueueClaimRequest.model_validate(await request.json())
+    claimed = await service.claim_queue(data.backend, data.session_seconds, key.name, data.lease_seconds)
+    return _ok(claimed, status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/queue/sweep", methods=["POST"])
+@_with_error_handling
+async def queue_sweep(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.ADMIN)
+    return _ok(await service.sweep_expired_leases())
+
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/runs/{run_id:int}", methods=["GET", "PATCH"])
+@_with_error_handling
+async def run_detail(request: Request) -> Response:
+    run_id = request.path_params["run_id"]
+    if request.method == "GET":
+        await auth.require_scope_from_request(request, Scope.READ)
+        return _ok(await service.get_run(run_id))
+
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    data = RunUpdate.model_validate(await request.json())
+    return _ok(await service.update_run(run_id, data))
+
+
+@mcp.endpoint("/v1/runs/{run_id:int}/lease", methods=["POST"])
+@_with_error_handling
+async def run_lease(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    run_id = request.path_params["run_id"]
+    body = await request.json() if await request.body() else {}
+    data = LeaseRenewal.model_validate(body)
+    return _ok(await service.renew_lease(run_id, data.lease_seconds))
+
+
+@mcp.endpoint("/v1/runs/{run_id:int}/results", methods=["POST"])
+@_with_error_handling
+async def run_results(request: Request) -> Response:
+    key = await auth.require_scope_from_request(request, Scope.WRITE)
+    run_id = request.path_params["run_id"]
+    data = ResultCreate.model_validate(await request.json())
+    return _ok(await service.submit_result(run_id, key.name, data), status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/runs/{run_id:int}/artifacts", methods=["POST"])
+@_with_error_handling
+async def run_artifacts(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    run_id = request.path_params["run_id"]
+    data = ArtifactCreate.model_validate(await request.json())
+    return _ok(await service.register_artifact(run_id, data), status=HTTPStatus.CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Artifacts — R2 presign/download land in Phase 2; routes exist now so the
+# API surface matches the spec, but they report themselves as not implemented.
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/runs/{run_id:int}/artifacts/presign", methods=["POST"])
+@_with_error_handling
+async def run_artifacts_presign(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    return JSONResponse(
+        {"error": "not_implemented", "detail": "R2 presigned uploads land in Phase 2"},
+        status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+    )
+
+
+@mcp.endpoint("/v1/artifacts/{artifact_id:int}/download", methods=["GET"])
+@_with_error_handling
+async def artifact_download(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return JSONResponse(
+        {"error": "not_implemented", "detail": "R2 presigned downloads land in Phase 2"},
+        status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+    )

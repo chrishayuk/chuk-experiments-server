@@ -1,0 +1,22 @@
+# fly.toml for chuk-experiments-server.
+# Not deployed yet — run `fly launch --no-deploy` to create the app, set
+# secrets (`fly secrets set DATABASE_URL=... EXPERIMENTS_BOOTSTRAP_KEY=...`),
+# then `fly deploy`.
+
+app = 'chuk-experiments-server'
+primary_region = 'lhr'
+
+[build]
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

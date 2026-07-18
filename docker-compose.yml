@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: experiments
+      POSTGRES_PASSWORD: experiments
+      POSTGRES_DB: experiments
+    ports:
+      - "5433:5432"
+    volumes:
+      - chuk-experiments-pgdata:/var/lib/postgresql/data
+
+volumes:
+  chuk-experiments-pgdata:

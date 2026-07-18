@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chuk-experiments-server"
+version = "0.1.0"
+description = "Experiment registry & results server — record, search, and track research experiments across programmes"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Christopher Hay", email = "chrishayuk@googlemail.com" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "chuk-mcp-server>=0.25.6",
+    "asyncpg>=0.30.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.3.0",
+]
+
+[project.scripts]
+chuk-experiments-server = "chuk_experiments_server.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["chuk_experiments_server*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-v --strict-markers"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

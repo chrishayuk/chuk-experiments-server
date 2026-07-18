@@ -1,0 +1,315 @@
+"""MCP surface (spec §5). Same scope model as `rest.py`, same `service` calls
+— an agent using `search_experiments` gets the same data a human gets from
+`GET /v1/search`. Tool functions catch errors and return a plain error dict
+instead of raising, so a failed lookup reads as data to the calling agent
+rather than an opaque tool-call failure.
+
+Tool function signatures are the public MCP contract (chuk-mcp-server turns
+them straight into the JSON schema an agent sees), so auth/identity handling
+is inlined per-tool rather than injected by a decorator — a decorator would
+either leak an internal `key` parameter into that schema or require
+signature surgery to hide it, either way harder to follow than the
+straight-line version below.
+"""
+
+import uuid
+from typing import Any, Coroutine
+
+from . import auth, service
+from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, Scope
+from .errors import error_payload
+from .models import ArtifactCreate, ExperimentCreate, ResultCreate, RunCreate, RunUpdate, WriteupCreate
+from .serialization import to_jsonable
+from .server import mcp
+
+
+async def _guarded(scope: Scope, result: Coroutine) -> Any:
+    """Authenticate against `scope`, await `result`, return a JSON-safe value
+    or a plain error dict. For tools that don't need the caller's identity
+    beyond the scope check — see `append_writeup`/`submit_result` for the
+    ones that do."""
+    try:
+        await auth.require_scope_from_tool(scope)
+        return to_jsonable(await result)
+    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
+        _, body = error_payload(exc)
+        return body
+
+
+# ---------------------------------------------------------------------------
+# Read tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def get_index() -> Any:
+    """The primary discovery tool — the entire compact catalogue in one call:
+    slug, title, tags, status, hypothesis, and headline metric per
+    experiment. Small enough to read in full and match semantically
+    yourself; try this before search_experiments, and try 2-3 phrasings of
+    search_experiments before concluding something doesn't exist.
+    """
+    return await _guarded(Scope.READ, service.get_index())
+
+
+@mcp.tool
+async def list_programmes() -> Any:
+    """Enumerate every research programme (e.g. cn, div, larql) with its experiment count."""
+    return await _guarded(Scope.READ, service.list_programmes())
+
+
+@mcp.tool
+async def list_experiments(
+    programme: str | None = None,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    q: str | None = None,
+    limit: int = DEFAULT_LIST_LIMIT,
+) -> Any:
+    """Browse experiments, optionally filtered by programme slug, status, tags, or full-text query.
+
+    Args:
+        programme: Programme slug to filter by (e.g. "cn")
+        status: Experiment status to filter by (draft/planned/running/completed/abandoned/superseded)
+        tags: Only experiments with at least one of these tags
+        q: Free-text search over title/hypothesis/write-up
+        limit: Maximum rows to return
+    """
+    return await _guarded(
+        Scope.READ, service.list_experiments(programme=programme, status=status, tags=tags, q=q, limit=limit)
+    )
+
+
+@mcp.tool
+async def get_experiment(slug: str) -> Any:
+    """Fetch the full record for one experiment: hypothesis, design, latest write-up, and its runs.
+
+    Args:
+        slug: Experiment slug (e.g. "cn-7")
+    """
+    return await _guarded(Scope.READ, service.get_experiment(slug))
+
+
+@mcp.tool
+async def search_experiments(
+    query: str | None = None,
+    filters: dict[str, Any] | None = None,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+) -> Any:
+    """Full-text search over titles/hypotheses/write-ups, combinable with structured filters.
+
+    Args:
+        query: Free-text search query
+        filters: Optional dict — programme, status, tags (list), config_key +
+            config_value (matches a JSONB key on any of the experiment's
+            runs), metric + metric_op + metric_value (matches a result value
+            on any run, e.g. {"metric": "gsm8k_acc", "metric_op": "gt",
+            "metric_value": 0.4}; metric_op is one of eq/ne/gt/gte/lt/lte)
+        limit: Maximum rows to return
+    """
+    filters = filters or {}
+    return await _guarded(
+        Scope.READ,
+        service.search_experiments(
+            query=query,
+            programme=filters.get("programme"),
+            status=filters.get("status"),
+            tags=filters.get("tags"),
+            config_key=filters.get("config_key"),
+            config_value=filters.get("config_value"),
+            metric=filters.get("metric"),
+            metric_op=filters.get("metric_op"),
+            metric_value=filters.get("metric_value"),
+            limit=limit,
+        ),
+    )
+
+
+@mcp.tool
+async def get_run(run_id: int) -> Any:
+    """Fetch one run's detail: config, W&B URL, results, and registered artifacts.
+
+    Args:
+        run_id: Numeric run id
+    """
+    return await _guarded(Scope.READ, service.get_run(run_id))
+
+
+@mcp.tool
+async def compare_runs(run_ids: list[int], metric: str) -> Any:
+    """Tabular comparison of a single named metric across several runs.
+
+    Args:
+        run_ids: Run ids to compare
+        metric: Result name to compare (e.g. "gsm8k_acc")
+    """
+    return await _guarded(Scope.READ, service.compare_runs(run_ids, metric))
+
+
+@mcp.tool
+async def find_checkpoints(
+    experiment: str | None = None,
+    model: str | None = None,
+    kind: str | None = None,
+) -> Any:
+    """Locate artifacts by experiment slug, model, and/or kind.
+
+    Args:
+        experiment: Experiment slug to filter by
+        model: Model name to filter by (matches run config or experiment design)
+        kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
+    """
+    return await _guarded(Scope.READ, service.find_checkpoints(experiment=experiment, model=model, kind=kind))
+
+
+@mcp.tool
+async def peek_queue(backend: str | None = None) -> Any:
+    """Preview ready-to-claim runs (queued, dependencies satisfied) without claiming them.
+
+    Args:
+        backend: Only runs whose requirements accept this backend (or 'any'/unset)
+    """
+    return await _guarded(Scope.READ, service.peek_queue(backend=backend))
+
+
+# ---------------------------------------------------------------------------
+# Write tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool
+async def create_experiment(
+    programme: str,
+    slug: str,
+    title: str,
+    hypothesis: str | None = None,
+    design: dict[str, Any] | None = None,
+) -> Any:
+    """Register a new planned experiment.
+
+    Args:
+        programme: Programme slug this experiment belongs to
+        slug: Unique experiment slug (e.g. "cn-11")
+        title: Short human-readable title
+        hypothesis: What we expect and why
+        design: Model/dataset/params/arms as a JSON object
+    """
+    data = ExperimentCreate(programme=programme, slug=slug, title=title, hypothesis=hypothesis, design=design or {})
+    return await _guarded(Scope.WRITE, service.create_experiment(data))
+
+
+@mcp.tool
+async def append_writeup(slug: str, body_md: str) -> Any:
+    """Append a new write-up version to an experiment (author is the calling API key's identity).
+
+    Args:
+        slug: Experiment slug
+        body_md: Full write-up body in markdown
+    """
+    try:
+        key = await auth.require_scope_from_tool(Scope.WRITE)
+        return to_jsonable(await service.append_writeup(slug, key.name, WriteupCreate(body_md=body_md)))
+    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
+        _, body = error_payload(exc)
+        return body
+
+
+@mcp.tool
+async def submit_result(
+    run_id: int,
+    name: str,
+    value: float | None = None,
+    verdict: str | None = None,
+    notes: str | None = None,
+) -> Any:
+    """Submit a named metric/verdict for a run (submitted_by is the calling API key's identity).
+
+    Args:
+        run_id: Numeric run id
+        name: Metric name (e.g. "val_loss_final")
+        value: Scalar metric value
+        verdict: pass/fail/inconclusive/n/a
+        notes: Free-text notes
+    """
+    try:
+        key = await auth.require_scope_from_tool(Scope.WRITE)
+        data = ResultCreate(name=name, value=value, verdict=verdict, notes=notes)
+        return to_jsonable(await service.submit_result(run_id, key.name, data))
+    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
+        _, body = error_payload(exc)
+        return body
+
+
+@mcp.tool
+async def register_artifact(
+    run_id: int,
+    kind: str,
+    uri: str,
+    sha256: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> Any:
+    """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for a run.
+
+    Args:
+        run_id: Numeric run id
+        kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
+        uri: Storage URI (s3://... or file://...)
+        sha256: Content hash, if known
+        meta: Additional metadata (step, epoch, format, ...)
+    """
+    data = ArtifactCreate(kind=kind, uri=uri, sha256=sha256, meta=meta or {})
+    return await _guarded(Scope.WRITE, service.register_artifact(run_id, data))
+
+
+@mcp.tool
+async def set_run_status(run_id: int, status: str) -> Any:
+    """Update a run's lifecycle status.
+
+    Args:
+        run_id: Numeric run id
+        status: queued/claimed/running/completed/failed/killed/lost/cancelled
+    """
+    return await _guarded(Scope.WRITE, service.update_run(run_id, RunUpdate(status=status)))
+
+
+@mcp.tool
+async def enqueue_run(
+    slug: str,
+    workspec: dict[str, Any],
+    requirements: dict[str, Any] | None = None,
+    priority: int = 0,
+    depends_on: list[int] | None = None,
+    est_seconds: int | None = None,
+) -> Any:
+    """Enqueue a run with a self-contained workspec for a harness worker to execute.
+
+    Args:
+        slug: Experiment slug this run belongs to
+        workspec: Everything a worker needs to run with no other context —
+            code (repo/ref/entrypoint), image, env (secret refs, not values),
+            inputs, outputs, optional success expression
+        requirements: e.g. {"backend": "any|colab|vastai|...", "gpu": "...", "min_vram_gb": ...}
+        priority: Higher claims first
+        depends_on: Run ids that must reach 'completed' before this one is ready
+        est_seconds: Estimated wall-clock cost, used for session packing at claim time
+    """
+    data = RunCreate(
+        experiment=slug,
+        slug=f"run-{uuid.uuid4().hex[:12]}",
+        workspec=workspec,
+        requirements=requirements or {},
+        priority=priority,
+        depends_on=depends_on or [],
+        est_seconds=est_seconds,
+    )
+    return await _guarded(Scope.WRITE, service.enqueue_run(data))
+
+
+@mcp.tool
+async def cancel_run(run_id: int) -> Any:
+    """Cancel a queued or claimed run (no-op error if it's already running/finished).
+
+    Args:
+        run_id: Numeric run id
+    """
+    return await _guarded(Scope.WRITE, service.cancel_run(run_id))
