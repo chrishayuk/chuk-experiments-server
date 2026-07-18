@@ -233,7 +233,11 @@ async def _create_run_with_artifact(dashboard_client, write_key):
     artifact = (
         await dashboard_client.post(
             f"/v1/runs/{run['id']}/artifacts",
-            json={"kind": "checkpoint", "uri": "s3://chuk-experiments/ckpt.bin"},
+            # Matches whatever settings.r2_bucket actually resolves to in this
+            # environment (real value locally, unset/None in CI) — key_from_uri
+            # rejects a URI whose bucket doesn't match, so this can't hardcode
+            # a bucket name the way build_uri would.
+            json={"kind": "checkpoint", "uri": f"s3://{settings.r2_bucket}/ckpt.bin"},
             headers={"Authorization": f"Bearer {write_key}"},
         )
     ).json()
