@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chuk-experiments</title>
+<style>
+  :root {
+    --plane:#0d0d0d; --surface:#1a1a19; --surface2:#212120; --ink:#f4f3ee; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --ring:rgba(255,255,255,.10); --ring2:rgba(255,255,255,.16);
+    --good:#22b45a; --warning:#fab219; --serious:#ec835a; --critical:#e0483d;
+    --accent:#3987e5; --accent2:#2bb1a8;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    color: var(--ink); background: var(--plane); -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h2, h3 { font-weight: 650; }
+  .mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  header {
+    display: flex; align-items: center; gap: .9rem; padding: .85rem 1.4rem;
+    border-bottom: 1px solid var(--ring); position: sticky; top: 0;
+    background: rgba(13,13,13,.86); backdrop-filter: blur(8px); z-index: 20;
+  }
+  header .brand { font-weight: 700; letter-spacing: .02em; }
+  header .brand b { color: var(--accent); }
+  header .tag { color: var(--muted); font-size: .82rem; }
+  header nav { display: flex; gap: 1rem; }
+  header .spacer { flex: 1; }
+  header .user { color: var(--muted); font-size: .82rem; }
+  header .user a { color: var(--muted); }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 1.4rem 1.4rem 3rem; }
+
+  .eyebrow { font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+    font-weight: 600; margin: 0 0 .55rem; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .7rem; margin-bottom: 1.2rem; }
+  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: .8rem .95rem; }
+  .tile .v { font-size: 1.6rem; font-weight: 650; font-family: var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .tile .l { color: var(--muted); font-size: .78rem; margin-top: .15rem; }
+
+  table { border-collapse: collapse; width: 100%; margin: .9rem 0; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid var(--grid); }
+  th { color: var(--muted); font-weight: 600; font-size: .7rem; letter-spacing: .05em; text-transform: uppercase; }
+  tr:hover td { background: var(--surface2); }
+  tr.click { cursor: pointer; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 12px;
+    padding: 1rem 1.2rem; margin-bottom: 1rem;
+  }
+  .card > strong { display: block; font-size: .7rem; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin-bottom: .5rem; }
+  .card .hd { display: flex; align-items: center; gap: .6rem; margin-bottom: .3rem; }
+  .card .hd h3 { margin: 0; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: .35rem; font-family: var(--mono); font-size: .74rem;
+    background: var(--surface2); border: 1px solid var(--ring); border-radius: 999px;
+    padding: .12rem .55rem; color: var(--ink2); margin: .1rem;
+  }
+  .chip.r2 { color: var(--serious); border-color: var(--serious); }
+  .chip.drive { color: var(--accent2); border-color: var(--accent2); }
+  .tag { display: inline-block; font-size: .74rem; padding: .12rem .55rem; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--ring); color: var(--ink2); margin: .1rem; }
+
+  .st { display: inline-flex; align-items: center; gap: .42rem; font-size: .85rem; white-space: nowrap; }
+  .st::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--muted); flex: none; }
+  .st.good::before { background: var(--good); }
+  .st.run::before { background: var(--accent); }
+  .st.bad::before { background: var(--critical); }
+  .st.warn::before { background: var(--warning); }
+  .st.mut::before { background: var(--muted); }
+
+  input, select, button {
+    font: inherit; padding: .4rem .6rem; border: 1px solid var(--ring2);
+    border-radius: 7px; background: var(--surface); color: var(--ink);
+  }
+  button, .button {
+    background: var(--accent); color: #0d0d0d; font-weight: 600; border: none; cursor: pointer;
+    border-radius: 8px;
+  }
+  button:hover, .button:hover { text-decoration: none; filter: brightness(1.1); }
+  form.filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+
+  .writeup { max-width: 75ch; color: var(--ink2); }
+  .writeup pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px; overflow-x: auto; }
+  .writeup code { background: var(--surface2); padding: .1rem .3rem; border-radius: 4px; font-family: var(--mono); }
+  pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px;
+    overflow-x: auto; font-family: var(--mono); font-size: .82rem; color: var(--ink2); }
+
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 2rem 0; text-align: center; }
+  .err { color: var(--critical); }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">chuk-<b>experiments</b></span><span class="tag">research registry</span>
+  <nav>
+    <a href="#/">Overview</a>
+    <a href="#/experiments">Experiments</a>
+    <a href="#/search">Search</a>
+  </nav>
+  <span class="spacer"></span>
+  {% if user_email %}
+    <span class="user">{{ user_email }} · <a href="/logout">Sign out</a></span>
+  {% endif %}
+</header>
+<main id="app"><p class="muted">Loading…</p></main>
+<script>
+const $=(s,r=document)=>r.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDt=v=>v?String(v).slice(0,16).replace("T"," "):"—";
+const fmtCost=v=>(v===null||v===undefined)?"—":"$"+Number(v).toFixed(4);
+
+/* Mirrors constants.STATUS_CSS_CLASS — kept in sync by hand, both are
+   small and static. */
+const STATUS_CLASS={draft:"mut",planned:"mut",running:"run",completed:"good",abandoned:"bad",
+  superseded:"mut",queued:"mut",claimed:"run",failed:"bad",killed:"bad",lost:"bad",cancelled:"mut"};
+const pill=s=>`<span class="st ${STATUS_CLASS[s]||"mut"}">${esc(s)}</span>`;
+
+async function api(path){
+  const r=await fetch(path);
+  let body=null;
+  try{body=await r.json();}catch(e){/* non-JSON error body */}
+  if(!r.ok)throw new Error((body&&body.error)||("http_"+r.status));
+  return body;
+}
+
+/* ---------------- overview ---------------- */
+async function loadOverview(){
+  let programmes,recent,running;
+  try{
+    [programmes,recent,running]=await Promise.all([
+      api("/v1/programmes"),
+      api("/v1/experiments?limit=10"),
+      api("/v1/experiments?"+new URLSearchParams({status:"running",limit:"10"})),
+    ]);
+  }catch(e){$("#app").innerHTML=`<p class="err">Failed to load overview: ${esc(e.message)}</p>`;return;}
+
+  const totalExperiments=programmes.reduce((sum,p)=>sum+(p.experiment_count||0),0);
+  const tiles=[["Programmes",programmes.length],["Total experiments",totalExperiments],
+    ["Currently running",running.length]];
+  const tilesH=tiles.map(([l,v])=>`<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+  const progRows=programmes.map(p=>`<tr class="click" onclick="location.hash='#/experiments?programme='+encodeURIComponent('${esc(p.slug)}')"><td><a href="#/experiments?programme=${encodeURIComponent(p.slug)}">${esc(p.name)}</a></td><td class="num">${esc(p.experiment_count)}</td></tr>`).join("")
+    ||`<tr><td colspan="2" class="empty">No programmes yet</td></tr>`;
+  const recentRows=recent.map(experimentRow).join("")||`<tr><td colspan="4" class="empty">Nothing yet</td></tr>`;
+  const runningRows=running.map(experimentRow).join("");
+
+  $("#app").innerHTML=`
+    <section><p class="eyebrow">Health</p><div class="tiles">${tilesH}</div></section>
+    <section><div class="card"><div class="hd"><h3>Programmes</h3></div>
+      <table><tr><th>Programme</th><th>Experiments</th></tr>${progRows}</table></div></section>
+    <section><div class="card"><div class="hd"><h3>Recently updated</h3></div>
+      <table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Updated</th></tr>${recentRows}</table></div></section>
+    ${running.length?`<section><div class="card"><div class="hd"><h3>Currently running</h3></div>
+      <table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Updated</th></tr>${runningRows}</table></div></section>`:""}
+  `;
+}
+
+function experimentRow(e){
+  return `<tr><td><a href="#/experiments/${encodeURIComponent(e.slug)}">${esc(e.title)}</a></td><td>${esc(e.programme_slug)}</td><td>${pill(e.status)}</td><td class="muted">${fmtDt(e.updated_at)}</td></tr>`;
+}
+
+/* ---------------- experiments list ---------------- */
+const EXPERIMENT_STATUSES=["draft","planned","running","completed","abandoned","superseded"];
+
+async function loadExperimentsList(params){
+  const programme=params.get("programme")||"";
+  const status=params.get("status")||"";
+  const tag=params.get("tag")||"";
+  const limit=parseInt(params.get("limit")||"50",10);
+
+  let experiments,programmes;
+  try{
+    const apiParams=new URLSearchParams({limit:String(limit+1)});
+    if(programme)apiParams.set("programme",programme);
+    if(status)apiParams.set("status",status);
+    if(tag)apiParams.set("tag",tag);
+    [experiments,programmes]=await Promise.all([api("/v1/experiments?"+apiParams),api("/v1/programmes")]);
+  }catch(e){$("#app").innerHTML=`<p class="err">Failed to load experiments: ${esc(e.message)}</p>`;return;}
+
+  const hasMore=experiments.length>limit;
+  experiments=experiments.slice(0,limit);
+
+  const progOptions=programmes.map(p=>`<option value="${esc(p.slug)}" ${p.slug===programme?"selected":""}>${esc(p.name)}</option>`).join("");
+  const statusOptions=EXPERIMENT_STATUSES.map(s=>`<option value="${s}" ${s===status?"selected":""}>${s}</option>`).join("");
+  const rows=experiments.map(e=>`<tr><td><a href="#/experiments/${encodeURIComponent(e.slug)}">${esc(e.title)}</a></td><td>${esc(e.programme_slug)}</td><td>${pill(e.status)}</td><td>${(e.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</td><td class="muted">${fmtDt(e.updated_at)}</td></tr>`).join("")
+    ||`<tr><td colspan="5" class="empty">No experiments match these filters</td></tr>`;
+
+  const nextParams=new URLSearchParams();
+  if(programme)nextParams.set("programme",programme);
+  if(status)nextParams.set("status",status);
+  if(tag)nextParams.set("tag",tag);
+  nextParams.set("limit",String(limit+50));
+
+  $("#app").innerHTML=`
+    <h2>Experiments</h2>
+    <form class="filters" id="filter-form">
+      <select name="programme"><option value="">All programmes</option>${progOptions}</select>
+      <select name="status"><option value="">Any status</option>${statusOptions}</select>
+      <input type="text" name="tag" placeholder="tag" value="${esc(tag)}">
+      <button type="submit">Filter</button>
+      ${(programme||status||tag)?`<a href="#/experiments">Clear</a>`:""}
+    </form>
+    <table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Tags</th><th>Updated</th></tr>${rows}</table>
+    <p class="muted">${hasMore?`Showing ${experiments.length} — <a href="#/experiments?${nextParams}">next page</a>`:`${experiments.length} experiment${experiments.length!==1?"s":""}`}</p>
+  `;
+  $("#filter-form").addEventListener("submit",ev=>{
+    ev.preventDefault();
+    const fd=new FormData(ev.target);
+    const p=new URLSearchParams();
+    for(const [k,v] of fd.entries())if(v)p.set(k,v);
+    location.hash="#/experiments"+(p.toString()?"?"+p:"");
+  });
+}
+
+/* ---------------- experiment detail ---------------- */
+async function loadExperimentDetail(slug){
+  let experiment;
+  try{experiment=await api("/v1/experiments/"+encodeURIComponent(slug));}
+  catch(e){$("#app").innerHTML=`<h1>Not found</h1><p class="err">${esc(e.message)}</p>`;return;}
+
+  const writeup=experiment.latest_writeup;
+  const hasDesign=experiment.design&&Object.keys(experiment.design).length;
+  const runsRows=(experiment.runs||[]).map(r=>`<tr><td><a href="#/runs/${encodeURIComponent(r.id)}" class="mono">${esc(r.slug)}</a></td><td>${pill(r.status)}</td><td>${esc(r.backend||"—")}</td><td>${fmtCost(r.cost_usd)}</td><td>${r.wandb_url?`<a href="${esc(r.wandb_url)}" target="_blank" rel="noopener">dashboard</a>`:"—"}</td></tr>`).join("")
+    ||`<tr><td colspan="5" class="empty">No runs yet</td></tr>`;
+
+  $("#app").innerHTML=`
+    <p class="muted"><a href="#/experiments?programme=${encodeURIComponent(experiment.programme_slug)}">${esc(experiment.programme_name)}</a> / ${esc(experiment.slug)}</p>
+    <h2>${esc(experiment.title)}</h2>
+    <p>${pill(experiment.status)} ${(experiment.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</p>
+    ${experiment.hypothesis?`<div class="card"><strong>Hypothesis</strong><p>${esc(experiment.hypothesis)}</p></div>`:""}
+    ${hasDesign?`<div class="card"><strong>Design</strong><pre>${esc(JSON.stringify(experiment.design,null,2))}</pre></div>`:""}
+    <h3>Write-up ${writeup?`<span class="muted">(v${writeup.version}, ${esc(writeup.author)})</span>`:""}</h3>
+    ${writeup?`<div class="writeup">${writeup.body_html}</div>`:`<p class="empty">No write-up yet</p>`}
+    <h3>Runs</h3>
+    <table><tr><th>Run</th><th>Status</th><th>Backend</th><th>Cost</th><th>W&amp;B</th></tr>${runsRows}</table>
+  `;
+}
+
+/* ---------------- run detail ---------------- */
+async function loadRunDetail(id){
+  let run;
+  try{run=await api("/v1/runs/"+encodeURIComponent(id));}
+  catch(e){$("#app").innerHTML=`<h1>Not found</h1><p class="err">${esc(e.message)}</p>`;return;}
+
+  const resultsRows=(run.results||[]).map(r=>`<tr><td>${esc(r.name)}</td><td>${r.value!=null?esc(r.value):(r.value_json?esc(JSON.stringify(r.value_json)):"—")}</td><td>${esc(r.verdict||"—")}</td><td class="muted">${esc(r.notes||"—")}</td><td class="muted">${esc(r.submitted_by)}</td></tr>`).join("")
+    ||`<tr><td colspan="5" class="empty">No results yet</td></tr>`;
+
+  const artifactsRows=(run.artifacts||[]).map(a=>{
+    if(String(a.uri||"").startsWith("gdrive://")){
+      const path=(a.meta&&a.meta.source_path)||a.uri;
+      return `<tr><td>${esc(a.kind)}</td><td><span class="chip drive">Drive · archive</span></td><td class="muted mono">${esc(path)}</td><td><a href="/v1/artifacts/${a.id}/download" target="_blank" rel="noopener">open in Drive</a></td></tr>`;
+    }
+    return `<tr><td>${esc(a.kind)}</td><td><span class="chip r2">R2</span></td><td class="muted mono">${esc(a.uri)}</td><td><a href="/v1/artifacts/${a.id}/download">download</a></td></tr>`;
+  }).join("")||`<tr><td colspan="4" class="empty">No artifacts yet</td></tr>`;
+
+  const hasConfig=run.config&&Object.keys(run.config).length;
+  const hasWorkspec=run.workspec&&Object.keys(run.workspec).length;
+
+  $("#app").innerHTML=`
+    <p class="muted"><a href="#/experiments/${encodeURIComponent(run.experiment_slug)}">${esc(run.experiment_title)}</a> / <span class="mono">${esc(run.slug)}</span></p>
+    <h2 class="mono">${esc(run.slug)}</h2>
+    <p>${pill(run.status)}</p>
+    <div class="card"><table>
+      <tr><td class="muted">Backend</td><td>${esc(run.backend||"—")}</td></tr>
+      <tr><td class="muted">Priority</td><td>${esc(run.priority)}</td></tr>
+      <tr><td class="muted">Cost</td><td>${fmtCost(run.cost_usd)}</td></tr>
+      <tr><td class="muted">W&amp;B</td><td>${run.wandb_url?`<a href="${esc(run.wandb_url)}" target="_blank" rel="noopener">${esc(run.wandb_url)}</a>`:"—"}</td></tr>
+      <tr><td class="muted">Started</td><td>${fmtDt(run.started_at)}</td></tr>
+      <tr><td class="muted">Ended</td><td>${fmtDt(run.ended_at)}</td></tr>
+      ${run.claimed_by?`<tr><td class="muted">Claimed by</td><td>${esc(run.claimed_by)}</td></tr>`:""}
+    </table></div>
+    ${hasConfig?`<div class="card"><strong>Config</strong><pre>${esc(JSON.stringify(run.config,null,2))}</pre></div>`:""}
+    ${hasWorkspec?`<div class="card"><strong>Workspec</strong><pre>${esc(JSON.stringify(run.workspec,null,2))}</pre></div>`:""}
+    <h3>Results</h3>
+    <table><tr><th>Name</th><th>Value</th><th>Verdict</th><th>Notes</th><th>By</th></tr>${resultsRows}</table>
+    <h3>Artifacts</h3>
+    <table><tr><th>Kind</th><th>Location</th><th>Path</th><th></th></tr>${artifactsRows}</table>
+  `;
+}
+
+/* ---------------- search ---------------- */
+async function loadSearch(params){
+  const q=params.get("q")||"";
+  let hits=[];
+  if(q){
+    try{hits=await api("/v1/search?"+new URLSearchParams({q,limit:"20"}));}
+    catch(e){$("#app").innerHTML=`<p class="err">${esc(e.message)}</p>`;return;}
+  }
+  const rows=hits.map(h=>`<tr><td><a href="#/experiments/${encodeURIComponent(h.slug)}">${esc(h.title)}</a></td><td>${esc(h.programme_slug)}</td><td>${pill(h.status)}</td><td class="muted">${h.snippet}</td></tr>`).join("")
+    ||(q?`<tr><td colspan="4" class="empty">No matches for "${esc(q)}"</td></tr>`:"");
+
+  $("#app").innerHTML=`
+    <h2>Search</h2>
+    <form class="filters" id="search-form">
+      <input type="text" name="q" placeholder="free-text query" value="${esc(q)}" autofocus>
+      <button type="submit">Search</button>
+    </form>
+    ${q?`<table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Snippet</th></tr>${rows}</table>`:`<p class="muted">Full-text search across experiment titles, hypotheses, and write-ups.</p>`}
+  `;
+  $("#search-form").addEventListener("submit",ev=>{
+    ev.preventDefault();
+    const v=new FormData(ev.target).get("q");
+    location.hash="#/search"+(v?"?q="+encodeURIComponent(v):"");
+  });
+}
+
+/* ---------------- router ---------------- */
+function route(){
+  const hash=(location.hash||"#/").slice(1);
+  const [path,queryString]=hash.split("?");
+  const params=new URLSearchParams(queryString||"");
+  let m;
+  if((m=path.match(/^\/experiments\/(.+)$/)))loadExperimentDetail(decodeURIComponent(m[1]));
+  else if(path==="/experiments")loadExperimentsList(params);
+  else if((m=path.match(/^\/runs\/(.+)$/)))loadRunDetail(decodeURIComponent(m[1]));
+  else if(path==="/search")loadSearch(params);
+  else loadOverview();
+}
+window.addEventListener("hashchange",route);
+route();
+</script>
+</body>
+</html>

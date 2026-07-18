@@ -1,95 +1,30 @@
-"""Dashboard (spec §8, Phase 4) — read-only, server-rendered. Every page
-calls this server's own REST API (see internal_client.py) using a fixed
-internal service key, never service.py directly — the human's identity is
-already verified by webauth.py's Google sign-in gate; the internal key just
-satisfies the REST layer's bearer-auth requirement on their behalf.
+"""Dashboard (spec §8, Phase 4) — a client-side single-page app, matching
+gpu-training-harness's chuk-train dashboard's pattern: one shell page (this
+module serves it), everything else is vanilla JS doing fetch() straight
+against this server's own REST API (see templates/app.html). No
+server-side proxy layer — auth.require_scope_from_request accepts the
+dashboard's own Google session cookie as an alternative to a bearer token
+for READ-scoped requests, so the browser can call /v1/* directly.
 """
 
-from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any, Callable
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.templating import Jinja2Templates
 
-from . import internal_client, webauth
+from . import webauth
 from .config import settings
 from .constants import (
-    DEFAULT_LIST_LIMIT,
-    DEFAULT_SEARCH_LIMIT,
-    ExperimentStatus,
     OAUTH_STATE_COOKIE_MAX_AGE_SECONDS,
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
-    STATUS_CSS_CLASS,
 )
-from .markdown_render import render as render_markdown
 from .server import mcp
 
 _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
-
-
-def _format_datetime(value: str | None) -> str:
-    """REST responses are JSON, so datetime fields arrive as ISO 8601
-    strings (e.g. "2026-07-18T14:44:15.750784+00:00"), not datetime objects
-    — no .strftime() available in templates, hence this filter."""
-    if not value:
-        return "—"
-    return value[:16].replace("T", " ")
-
-
-def _status_class(status: str) -> str:
-    """Maps a status string to a dashboard status-pill CSS class — see
-    STATUS_CSS_CLASS. Unrecognized statuses fall back to "mut" (muted/grey)
-    rather than raising, since this only affects display color."""
-    return STATUS_CSS_CLASS.get(status, "mut")
-
-
-_templates.env.filters["fmt_dt"] = _format_datetime
-_templates.env.filters["status_class"] = _status_class
-
-
-class DashboardAPIError(Exception):
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
-
-
-async def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    client = internal_client.get_client()
-    resp = await client.get(
-        path, params=params, headers={"Authorization": f"Bearer {settings.internal_api_key}"}
-    )
-    if resp.status_code >= 400:
-        raise DashboardAPIError(resp.status_code, resp.json().get("error", "request failed"))
-    return resp.json()
-
-
-def _render(request: Request, name: str, context: dict[str, Any]) -> HTMLResponse:
-    context["user_email"] = webauth.get_authenticated_email(request)
-    return _templates.TemplateResponse(request, name, context)
-
-
-def _dashboard_route(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
-    @wraps(handler)
-    async def wrapped(request: Request) -> Response:
-        # Google sign-in only gates the dashboard once it's actually
-        # configured (Fly secrets in production) — local dev has no Google
-        # credentials set, so it gets open access rather than a dead-end
-        # "sign-in not configured" redirect loop.
-        if settings.dashboard_auth_configured and not webauth.is_authenticated(request):
-            return RedirectResponse("/login", status_code=HTTPStatus.FOUND.value)
-        try:
-            return await handler(request)
-        except DashboardAPIError as exc:
-            status = HTTPStatus.NOT_FOUND if exc.status_code == 404 else HTTPStatus.BAD_GATEWAY
-            return HTMLResponse(f"<h1>{status.value}</h1><p>{exc.message}</p>", status_code=status.value)
-
-    return wrapped
 
 
 # ---------------------------------------------------------------------------
@@ -158,102 +93,18 @@ async def logout(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# Pages
+# SPA shell
 # ---------------------------------------------------------------------------
 
 
 @mcp.endpoint("/", methods=["GET"])
-@_dashboard_route
-async def overview(request: Request) -> Response:
-    programmes = await _api_get("/v1/programmes")
-    recent = await _api_get("/v1/experiments", params={"limit": 10})
-    running = await _api_get(
-        "/v1/experiments", params={"status": ExperimentStatus.RUNNING.value, "limit": 10}
+async def app_shell(request: Request) -> Response:
+    """Serves the single-page app shell — everything past this is client-side
+    JS hash-routing + fetch() against /v1/*. Google sign-in only gates this
+    once actually configured (Fly secrets in production); local dev, with
+    no Google credentials set, gets straight in."""
+    if settings.dashboard_auth_configured and not webauth.is_authenticated(request):
+        return RedirectResponse("/login", status_code=HTTPStatus.FOUND.value)
+    return _templates.TemplateResponse(
+        request, "app.html", {"user_email": webauth.get_authenticated_email(request)}
     )
-    return _render(request, "index.html", {"programmes": programmes, "recent": recent, "running": running})
-
-
-@mcp.endpoint("/experiments", methods=["GET"])
-@_dashboard_route
-async def experiments_list(request: Request) -> Response:
-    params = request.query_params
-    programme = params.get("programme") or None
-    status = params.get("status") or None
-    tag = params.get("tag") or None
-    limit = int(params.get("limit", DEFAULT_LIST_LIMIT))
-
-    api_params: dict[str, Any] = {"limit": limit + 1}
-    if programme:
-        api_params["programme"] = programme
-    if status:
-        api_params["status"] = status
-    if tag:
-        api_params["tag"] = tag
-
-    experiments = await _api_get("/v1/experiments", params=api_params)
-    has_more = len(experiments) > limit
-    experiments = experiments[:limit]
-
-    next_page_params = {k: v for k, v in {"programme": programme, "status": status, "tag": tag}.items() if v}
-    next_page_params["limit"] = limit + DEFAULT_LIST_LIMIT
-
-    return _render(
-        request,
-        "experiments.html",
-        {
-            "experiments": experiments,
-            "programmes": await _api_get("/v1/programmes"),
-            "statuses": [s.value for s in ExperimentStatus],
-            "filters": {"programme": programme, "status": status, "tag": tag},
-            "has_more": has_more,
-            "next_page_url": "/experiments?" + "&".join(f"{k}={v}" for k, v in next_page_params.items()),
-        },
-    )
-
-
-@mcp.endpoint("/experiments/{slug}", methods=["GET"])
-@_dashboard_route
-async def experiment_detail(request: Request) -> Response:
-    slug = request.path_params["slug"]
-    experiment = await _api_get(f"/v1/experiments/{slug}")
-    writeup_html = (
-        render_markdown(experiment["latest_writeup"]["body_md"]) if experiment.get("latest_writeup") else ""
-    )
-    return _render(
-        request, "experiment_detail.html", {"experiment": experiment, "writeup_html": writeup_html}
-    )
-
-
-@mcp.endpoint("/runs/{run_id}", methods=["GET"])
-@_dashboard_route
-async def run_detail(request: Request) -> Response:
-    run = await _api_get(f"/v1/runs/{request.path_params['run_id']}")
-    return _render(request, "run_detail.html", {"run": run})
-
-
-@mcp.endpoint("/search", methods=["GET"])
-@_dashboard_route
-async def search_page(request: Request) -> Response:
-    query = request.query_params.get("q") or None
-    hits = await _api_get("/v1/search", params={"q": query, "limit": DEFAULT_SEARCH_LIMIT}) if query else []
-    return _render(request, "search.html", {"query": query, "hits": hits})
-
-
-@mcp.endpoint("/artifacts/{artifact_id:int}/download", methods=["GET"])
-@_dashboard_route
-async def artifact_download_redirect(request: Request) -> Response:
-    """Proxies the REST API's own download redirect (a presigned R2 URL, or
-    a Drive folder link for an archived artifact): a browser can't attach
-    the internal bearer token itself, so this server makes that call and
-    forwards the resulting URL as its own redirect instead."""
-    client = internal_client.get_client()
-    resp = await client.get(
-        f"/v1/artifacts/{request.path_params['artifact_id']}/download",
-        headers={"Authorization": f"Bearer {settings.internal_api_key}"},
-        follow_redirects=False,
-    )
-    if resp.status_code == HTTPStatus.FOUND:
-        return RedirectResponse(resp.headers["location"], status_code=HTTPStatus.FOUND.value)
-    if resp.status_code >= 400:
-        raise DashboardAPIError(resp.status_code, resp.json().get("error", "download failed"))
-    return HTMLResponse("<h1>Unexpected response</h1>", status_code=HTTPStatus.BAD_GATEWAY.value)

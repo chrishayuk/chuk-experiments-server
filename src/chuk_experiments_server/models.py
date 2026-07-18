@@ -53,6 +53,11 @@ class ProgrammeCreate(BaseModel):
 class Writeup(RecordModel):
     version: int
     body_md: str
+    #: Sanitized HTML rendering of body_md (markdown_render.render), computed
+    #: at read time — never stored — so any REST/MCP consumer gets it
+    #: without needing its own markdown parser (the dashboard SPA in
+    #: particular; see web.py).
+    body_html: str
     author: str
     created_at: datetime
 

@@ -29,6 +29,7 @@ from .constants import (
     RunStatus,
 )
 from .db import get_pool
+from .markdown_render import render as render_writeup_html
 from .models import (
     Artifact,
     ArtifactCreate,
@@ -189,7 +190,12 @@ async def get_experiment(slug: str) -> Experiment:
         """,
         experiment["id"],
     )
-    experiment["latest_writeup"] = Writeup.model_validate(dict(writeup_row)) if writeup_row else None
+    if writeup_row:
+        writeup = dict(writeup_row)
+        writeup["body_html"] = render_writeup_html(writeup["body_md"])
+        experiment["latest_writeup"] = Writeup.model_validate(writeup)
+    else:
+        experiment["latest_writeup"] = None
 
     run_rows = await pool.fetch(
         """
@@ -272,7 +278,9 @@ async def append_writeup(slug: str, author: str, data: WriteupCreate) -> Writeup
             data.body_md,
             author,
         )
-    return Writeup.model_validate(dict(row))
+    writeup = dict(row)
+    writeup["body_html"] = render_writeup_html(writeup["body_md"])
+    return Writeup.model_validate(writeup)
 
 
 async def search_experiments(

@@ -12,6 +12,8 @@ from http import HTTPStatus
 
 from starlette.requests import Request
 
+from . import webauth
+from .config import settings
 from .constants import AUTHORIZATION_HEADER, BEARER_PREFIX, Scope
 from .db import get_pool
 from .models import ApiKey
@@ -87,8 +89,20 @@ async def _require_scope(raw_token: str | None, scope: Scope) -> ApiKey:
     return record
 
 
-async def require_scope_from_request(request: Request, scope: Scope) -> ApiKey:
-    return await _require_scope(bearer_from_request(request), scope)
+async def require_scope_from_request(request: Request, scope: Scope) -> ApiKey | None:
+    """A bearer token always works, for any scope. For Scope.READ only, the
+    dashboard's own Google session cookie is also accepted (letting the SPA
+    call /v1/* directly instead of through a server-side proxy), and — when
+    dashboard auth isn't configured at all (local dev) — no credential is
+    required, matching local dev's existing open-access behavior. Neither
+    fallback ever satisfies WRITE/ADMIN: the dashboard is read-only by
+    design, so a browser session should never be able to mutate data."""
+    token = bearer_from_request(request)
+    if token:
+        return await _require_scope(token, scope)
+    if scope == Scope.READ and (not settings.dashboard_auth_configured or webauth.is_authenticated(request)):
+        return None
+    raise AuthError("Missing or invalid API key", status_code=HTTPStatus.UNAUTHORIZED)
 
 
 async def require_scope_from_tool(scope: Scope) -> ApiKey:

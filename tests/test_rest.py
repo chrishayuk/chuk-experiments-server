@@ -37,6 +37,27 @@ async def test_programmes_empty_list(api_client, write_key):
     assert resp.json() == []
 
 
+async def test_programmes_accepts_dashboard_session_cookie_with_no_bearer_token(
+    api_client, authenticated_cookies
+):
+    """A READ route must work for the dashboard SPA calling /v1/* directly
+    with only its Google session cookie, no Authorization header at all."""
+    resp = await api_client.get("/v1/programmes", cookies=authenticated_cookies)
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == []
+
+
+async def test_create_experiment_rejects_cookie_only_request(api_client, authenticated_cookies):
+    """The dashboard session cookie satisfies Scope.READ only — a WRITE
+    route must still reject a request carrying just the cookie."""
+    resp = await api_client.post(
+        "/v1/experiments",
+        json={"programme": "cn", "slug": "cn-7", "title": "t"},
+        cookies=authenticated_cookies,
+    )
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+
+
 # --- Experiments ---------------------------------------------------------------
 
 

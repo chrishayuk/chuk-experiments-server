@@ -114,3 +114,62 @@ async def test_require_scope_sufficient_scope_returns_key():
     await auth.upsert_bootstrap_key("writer:read|write:writer-raw-key")
     record = await auth._require_scope("writer-raw-key", Scope.WRITE)
     assert record.name == "writer"
+
+
+def _fake_request(cookies: dict[str, str] | None = None, authorization: str | None = None):
+    from starlette.requests import Request
+
+    headers = []
+    if authorization:
+        headers.append((b"authorization", authorization.encode()))
+    if cookies:
+        headers.append((b"cookie", "; ".join(f"{k}={v}" for k, v in cookies.items()).encode()))
+    return Request({"type": "http", "headers": headers, "method": "GET", "path": "/"})
+
+
+async def test_require_scope_from_request_bearer_token_still_works():
+    await auth.upsert_bootstrap_key("writer:read|write:writer-raw-key-2")
+    record = await auth.require_scope_from_request(
+        _fake_request(authorization="Bearer writer-raw-key-2"), Scope.WRITE
+    )
+    assert record.name == "writer"
+
+
+async def test_require_scope_from_request_valid_session_cookie_satisfies_read(monkeypatch):
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.config import settings
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+
+    monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: True))
+    token = webauth.create_session_cookie_value(settings.dashboard_allowed_email)
+    request = _fake_request(cookies={SESSION_COOKIE_NAME: token})
+    assert await auth.require_scope_from_request(request, Scope.READ) is None
+
+
+async def test_require_scope_from_request_session_cookie_never_satisfies_write(monkeypatch):
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.config import settings
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+
+    monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: True))
+    token = webauth.create_session_cookie_value(settings.dashboard_allowed_email)
+    request = _fake_request(cookies={SESSION_COOKIE_NAME: token})
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_scope_from_request(request, Scope.WRITE)
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_require_scope_from_request_open_access_when_dashboard_auth_not_configured(monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: False))
+    assert await auth.require_scope_from_request(_fake_request(), Scope.READ) is None
+
+
+async def test_require_scope_from_request_no_credential_is_unauthorized_when_configured(monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: True))
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_scope_from_request(_fake_request(), Scope.READ)
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
