@@ -9,6 +9,7 @@ doesn't have.
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
 from . import auth, service
@@ -32,10 +33,10 @@ def _register_rest_routes() -> None:
     """chuk-mcp-server's HTTPServer.__init__ clears the endpoint registry and
     registers its own built-ins (ping/health/mcp/...) BEFORE calling
     `post_register_hook` — see chuk_mcp_server/http_server.py's
-    `_register_endpoints`. Importing `rest` (whose @mcp.endpoint decorators
-    fire at import time) has to happen inside that hook, not before
-    `mcp.run()`, or our routes get wiped by that clear."""
-    from . import rest  # noqa: F401 - imported for its @mcp.endpoint side effects
+    `_register_endpoints`. Importing `rest`/`web` (whose @mcp.endpoint
+    decorators fire at import time) has to happen inside that hook, not
+    before `mcp.run()`, or our routes get wiped by that clear."""
+    from . import rest, web  # noqa: F401 - imported for their @mcp.endpoint side effects
 
 
 def _serve(host: str, port: int, log_level: str) -> None:
@@ -44,6 +45,11 @@ def _serve(host: str, port: int, log_level: str) -> None:
     # tools aren't affected by the endpoint-registry clear described above.
     from . import tools  # noqa: F401 - imported for its @mcp.tool side effects
     from .server import mcp
+
+    # tools.py/web.py call this server's own REST API over HTTP (see
+    # internal_client.py) — point that loopback client at whatever port
+    # we're actually about to bind, rather than a hardcoded default.
+    os.environ.setdefault("INTERNAL_API_BASE_URL", f"http://127.0.0.1:{port}")
 
     mcp.run(host=host, port=port, log_level=log_level.lower(), post_register_hook=_register_rest_routes)
 
@@ -68,7 +74,9 @@ async def _sweep(max_attempts: int) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="chuk-experiments-server", description="Experiment registry & results server")
+    parser = argparse.ArgumentParser(
+        prog="chuk-experiments-server", description="Experiment registry & results server"
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
 
@@ -101,7 +109,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _build_parser().parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level), format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    )
 
     if args.command == "migrate":
         asyncio.run(_migrate())

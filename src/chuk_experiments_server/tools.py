@@ -1,39 +1,49 @@
-"""MCP surface (spec §5). Same scope model as `rest.py`, same `service` calls
-— an agent using `search_experiments` gets the same data a human gets from
-`GET /v1/search`. Tool functions catch errors and return a plain error dict
-instead of raising, so a failed lookup reads as data to the calling agent
-rather than an opaque tool-call failure.
+"""MCP surface (spec §5). Every tool forwards to this server's own REST API
+(see internal_client.py) using the *calling agent's own bearer token* —
+extracted from the ambient MCP context via auth.bearer_from_mcp_context() —
+so the REST layer performs the exact same scope check it would for any
+other client. tools.py holds no auth/validation logic of its own; it's a
+thin MCP-to-REST adapter, one level further out than "the MCP server is a
+thin layer over the same service functions" (the original spec's phrasing)
+— now it's a thin layer over the same REST API instead, so the UI, MCP
+agents, and any external REST client all go through one code path.
 
-Tool function signatures are the public MCP contract (chuk-mcp-server turns
-them straight into the JSON schema an agent sees), so auth/identity handling
-is inlined per-tool rather than injected by a decorator — a decorator would
-either leak an internal `key` parameter into that schema or require
-signature surgery to hide it, either way harder to follow than the
-straight-line version below.
+A tool never raises on a failed request — it returns whatever JSON body the
+REST endpoint produced (its own error shape included), so a failed lookup
+reads as data to the calling agent rather than an opaque tool-call failure.
 """
 
 import uuid
-from typing import Any, Coroutine
+from typing import Any
 
-from . import auth, service
-from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, Scope
-from .errors import error_payload
-from .models import ArtifactCreate, ExperimentCreate, ResultCreate, RunCreate, RunUpdate, WriteupCreate
-from .serialization import to_jsonable
+import httpx
+
+from . import auth, internal_client
+from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT
 from .server import mcp
 
 
-async def _guarded(scope: Scope, result: Coroutine) -> Any:
-    """Authenticate against `scope`, await `result`, return a JSON-safe value
-    or a plain error dict. For tools that don't need the caller's identity
-    beyond the scope check — see `append_writeup`/`submit_result` for the
-    ones that do."""
+async def _api_request(method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
+    """Forward to `path` on this server's own REST API, using the calling
+    agent's own bearer token. Never raises — a transport-level failure
+    (the internal loopback call itself failing) becomes an error dict, same
+    shape as errors.error_payload produces for REST/other tools."""
+    token = auth.bearer_from_mcp_context()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        await auth.require_scope_from_tool(scope)
-        return to_jsonable(await result)
-    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
-        _, body = error_payload(exc)
-        return body
+        resp = await internal_client.get_client().request(method, path, headers=headers, **kwargs)
+    except httpx.HTTPError as exc:
+        return {"error": f"internal_request_failed: {exc}"}
+    try:
+        return resp.json()
+    except ValueError:
+        return {"error": "internal_response_not_json"}
+
+
+def _query_params(**kwargs: Any) -> dict[str, Any]:
+    """Drop None values — httpx would otherwise send them as the literal
+    string 'None' in the query string."""
+    return {k: v for k, v in kwargs.items() if v is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +59,13 @@ async def get_index() -> Any:
     yourself; try this before search_experiments, and try 2-3 phrasings of
     search_experiments before concluding something doesn't exist.
     """
-    return await _guarded(Scope.READ, service.get_index())
+    return await _api_request("GET", "/v1/index")
 
 
 @mcp.tool
 async def list_programmes() -> Any:
     """Enumerate every research programme (e.g. cn, div, larql) with its experiment count."""
-    return await _guarded(Scope.READ, service.list_programmes())
+    return await _api_request("GET", "/v1/programmes")
 
 
 @mcp.tool
@@ -75,9 +85,10 @@ async def list_experiments(
         q: Free-text search over title/hypothesis/write-up
         limit: Maximum rows to return
     """
-    return await _guarded(
-        Scope.READ, service.list_experiments(programme=programme, status=status, tags=tags, q=q, limit=limit)
-    )
+    params = _query_params(programme=programme, status=status, q=q, limit=limit)
+    if tags:
+        params["tag"] = tags
+    return await _api_request("GET", "/v1/experiments", params=params)
 
 
 @mcp.tool
@@ -87,7 +98,7 @@ async def get_experiment(slug: str) -> Any:
     Args:
         slug: Experiment slug (e.g. "cn-7")
     """
-    return await _guarded(Scope.READ, service.get_experiment(slug))
+    return await _api_request("GET", f"/v1/experiments/{slug}")
 
 
 @mcp.tool
@@ -108,21 +119,18 @@ async def search_experiments(
         limit: Maximum rows to return
     """
     filters = filters or {}
-    return await _guarded(
-        Scope.READ,
-        service.search_experiments(
-            query=query,
-            programme=filters.get("programme"),
-            status=filters.get("status"),
-            tags=filters.get("tags"),
-            config_key=filters.get("config_key"),
-            config_value=filters.get("config_value"),
-            metric=filters.get("metric"),
-            metric_op=filters.get("metric_op"),
-            metric_value=filters.get("metric_value"),
-            limit=limit,
-        ),
+    params = _query_params(
+        q=query, programme=filters.get("programme"), status=filters.get("status"), limit=limit
     )
+    if filters.get("tags"):
+        params["tag"] = filters["tags"]
+    if filters.get("config_key") and filters.get("config_value") is not None:
+        params[f"config.{filters['config_key']}"] = filters["config_value"]
+    if filters.get("metric") and filters.get("metric_op") and filters.get("metric_value") is not None:
+        params["metric"] = filters["metric"]
+        params["op"] = filters["metric_op"]
+        params["value"] = filters["metric_value"]
+    return await _api_request("GET", "/v1/search", params=params)
 
 
 @mcp.tool
@@ -132,7 +140,7 @@ async def get_run(run_id: int) -> Any:
     Args:
         run_id: Numeric run id
     """
-    return await _guarded(Scope.READ, service.get_run(run_id))
+    return await _api_request("GET", f"/v1/runs/{run_id}")
 
 
 @mcp.tool
@@ -143,7 +151,7 @@ async def compare_runs(run_ids: list[int], metric: str) -> Any:
         run_ids: Run ids to compare
         metric: Result name to compare (e.g. "gsm8k_acc")
     """
-    return await _guarded(Scope.READ, service.compare_runs(run_ids, metric))
+    return await _api_request("GET", "/v1/runs/compare", params={"ids": run_ids, "metric": metric})
 
 
 @mcp.tool
@@ -159,7 +167,8 @@ async def find_checkpoints(
         model: Model name to filter by (matches run config or experiment design)
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
     """
-    return await _guarded(Scope.READ, service.find_checkpoints(experiment=experiment, model=model, kind=kind))
+    params = _query_params(experiment=experiment, model=model, kind=kind)
+    return await _api_request("GET", "/v1/artifacts", params=params)
 
 
 @mcp.tool
@@ -169,7 +178,7 @@ async def peek_queue(backend: str | None = None) -> Any:
     Args:
         backend: Only runs whose requirements accept this backend (or 'any'/unset)
     """
-    return await _guarded(Scope.READ, service.peek_queue(backend=backend))
+    return await _api_request("GET", "/v1/queue", params=_query_params(backend=backend))
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +203,14 @@ async def create_experiment(
         hypothesis: What we expect and why
         design: Model/dataset/params/arms as a JSON object
     """
-    data = ExperimentCreate(programme=programme, slug=slug, title=title, hypothesis=hypothesis, design=design or {})
-    return await _guarded(Scope.WRITE, service.create_experiment(data))
+    body = {
+        "programme": programme,
+        "slug": slug,
+        "title": title,
+        "hypothesis": hypothesis,
+        "design": design or {},
+    }
+    return await _api_request("POST", "/v1/experiments", json=body)
 
 
 @mcp.tool
@@ -206,12 +221,7 @@ async def append_writeup(slug: str, body_md: str) -> Any:
         slug: Experiment slug
         body_md: Full write-up body in markdown
     """
-    try:
-        key = await auth.require_scope_from_tool(Scope.WRITE)
-        return to_jsonable(await service.append_writeup(slug, key.name, WriteupCreate(body_md=body_md)))
-    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
-        _, body = error_payload(exc)
-        return body
+    return await _api_request("POST", f"/v1/experiments/{slug}/writeups", json={"body_md": body_md})
 
 
 @mcp.tool
@@ -231,13 +241,8 @@ async def submit_result(
         verdict: pass/fail/inconclusive/n/a
         notes: Free-text notes
     """
-    try:
-        key = await auth.require_scope_from_tool(Scope.WRITE)
-        data = ResultCreate(name=name, value=value, verdict=verdict, notes=notes)
-        return to_jsonable(await service.submit_result(run_id, key.name, data))
-    except Exception as exc:  # noqa: BLE001 - translated uniformly via error_payload
-        _, body = error_payload(exc)
-        return body
+    body = {"name": name, "value": value, "verdict": verdict, "notes": notes}
+    return await _api_request("POST", f"/v1/runs/{run_id}/results", json=body)
 
 
 @mcp.tool
@@ -257,8 +262,8 @@ async def register_artifact(
         sha256: Content hash, if known
         meta: Additional metadata (step, epoch, format, ...)
     """
-    data = ArtifactCreate(kind=kind, uri=uri, sha256=sha256, meta=meta or {})
-    return await _guarded(Scope.WRITE, service.register_artifact(run_id, data))
+    body = {"kind": kind, "uri": uri, "sha256": sha256, "meta": meta or {}}
+    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
 
 
 @mcp.tool
@@ -269,7 +274,7 @@ async def set_run_status(run_id: int, status: str) -> Any:
         run_id: Numeric run id
         status: queued/claimed/running/completed/failed/killed/lost/cancelled
     """
-    return await _guarded(Scope.WRITE, service.update_run(run_id, RunUpdate(status=status)))
+    return await _api_request("PATCH", f"/v1/runs/{run_id}", json={"status": status})
 
 
 @mcp.tool
@@ -293,16 +298,15 @@ async def enqueue_run(
         depends_on: Run ids that must reach 'completed' before this one is ready
         est_seconds: Estimated wall-clock cost, used for session packing at claim time
     """
-    data = RunCreate(
-        experiment=slug,
-        slug=f"run-{uuid.uuid4().hex[:12]}",
-        workspec=workspec,
-        requirements=requirements or {},
-        priority=priority,
-        depends_on=depends_on or [],
-        est_seconds=est_seconds,
-    )
-    return await _guarded(Scope.WRITE, service.enqueue_run(data))
+    body = {
+        "slug": f"run-{uuid.uuid4().hex[:12]}",
+        "workspec": workspec,
+        "requirements": requirements or {},
+        "priority": priority,
+        "depends_on": depends_on or [],
+        "est_seconds": est_seconds,
+    }
+    return await _api_request("POST", f"/v1/experiments/{slug}/runs", json=body)
 
 
 @mcp.tool
@@ -312,4 +316,4 @@ async def cancel_run(run_id: int) -> Any:
     Args:
         run_id: Numeric run id
     """
-    return await _guarded(Scope.WRITE, service.cancel_run(run_id))
+    return await _api_request("POST", f"/v1/runs/{run_id}/cancel")

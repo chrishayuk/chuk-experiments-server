@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Search — chuk-experiments{% endblock %}
+{% block content %}
+
+<h2>Search</h2>
+
+<form class="filters" method="get" action="/search">
+  <input type="text" name="q" placeholder="free-text query" value="{{ query or '' }}" autofocus>
+  <button type="submit">Search</button>
+</form>
+
+{% if query %}
+<table>
+  <tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Snippet</th></tr>
+  {% for hit in hits %}
+  <tr>
+    <td><a href="/experiments/{{ hit.slug }}">{{ hit.title }}</a></td>
+    <td>{{ hit.programme_slug }}</td>
+    <td><span class="status status-{{ hit.status }}">{{ hit.status }}</span></td>
+    <td class="muted">{{ hit.snippet | safe }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="empty">No matches for "{{ query }}"</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">Full-text search across experiment titles, hypotheses, and write-ups.</p>
+{% endif %}
+
+{% endblock %}

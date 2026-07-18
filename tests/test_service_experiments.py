@@ -59,7 +59,9 @@ async def test_get_experiment_missing_raises_not_found():
 
 async def test_update_experiment_status_and_tags():
     await service.create_experiment(_experiment_create())
-    updated = await service.update_experiment("cn-7", ExperimentUpdate(status=ExperimentStatus.COMPLETED, tags=["v11"]))
+    updated = await service.update_experiment(
+        "cn-7", ExperimentUpdate(status=ExperimentStatus.COMPLETED, tags=["v11"])
+    )
     assert updated.status == ExperimentStatus.COMPLETED
     assert updated.tags == ["v11"]
 
@@ -71,7 +73,9 @@ async def test_update_experiment_missing_raises_not_found():
 
 async def test_list_experiments_filters_by_programme_and_status():
     await service.create_experiment(_experiment_create(programme="cn", slug="cn-7"))
-    await service.create_experiment(_experiment_create(programme="div", slug="div-3", status=ExperimentStatus.RUNNING))
+    await service.create_experiment(
+        _experiment_create(programme="div", slug="div-3", status=ExperimentStatus.RUNNING)
+    )
 
     cn_only = await service.list_experiments(programme="cn")
     assert [e.slug for e in cn_only] == ["cn-7"]
@@ -90,10 +94,14 @@ async def test_list_experiments_filters_by_tag():
 
 async def test_search_experiments_full_text_ranks_relevant_first():
     await service.create_experiment(
-        _experiment_create(title="Layer-phase readout of fingerprint embeddings", hypothesis="fingerprint signal")
+        _experiment_create(
+            title="Layer-phase readout of fingerprint embeddings", hypothesis="fingerprint signal"
+        )
     )
     await service.create_experiment(
-        _experiment_create(slug="cn-8", title="Unrelated batching experiment", hypothesis="batching throughput")
+        _experiment_create(
+            slug="cn-8", title="Unrelated batching experiment", hypothesis="batching throughput"
+        )
     )
 
     hits = await service.search_experiments(query="fingerprint")

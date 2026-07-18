@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ run.slug }} — chuk-experiments{% endblock %}
+{% block content %}
+
+<p class="muted"><a href="/experiments/{{ run.experiment_slug }}">{{ run.experiment_title }}</a> / {{ run.slug }}</p>
+<h2>Run: {{ run.slug }}</h2>
+<p><span class="status status-{{ run.status }}">{{ run.status }}</span></p>
+
+<div class="card">
+  <table>
+    <tr><td class="muted">Backend</td><td>{{ run.backend or "—" }}</td></tr>
+    <tr><td class="muted">Priority</td><td>{{ run.priority }}</td></tr>
+    <tr><td class="muted">Cost</td><td>{{ "$%.4f"|format(run.cost_usd) if run.cost_usd is not none else "—" }}</td></tr>
+    <tr><td class="muted">W&amp;B</td><td>{% if run.wandb_url %}<a href="{{ run.wandb_url }}">{{ run.wandb_url }}</a>{% else %}—{% endif %}</td></tr>
+    <tr><td class="muted">Started</td><td>{{ run.started_at | fmt_dt }}</td></tr>
+    <tr><td class="muted">Ended</td><td>{{ run.ended_at | fmt_dt }}</td></tr>
+    {% if run.claimed_by %}<tr><td class="muted">Claimed by</td><td>{{ run.claimed_by }}</td></tr>{% endif %}
+  </table>
+</div>
+
+{% if run.config %}
+<div class="card"><strong>Config</strong><pre>{{ run.config | tojson(indent=2) }}</pre></div>
+{% endif %}
+{% if run.workspec %}
+<div class="card"><strong>Workspec</strong><pre>{{ run.workspec | tojson(indent=2) }}</pre></div>
+{% endif %}
+
+<h3>Results</h3>
+<table>
+  <tr><th>Name</th><th>Value</th><th>Verdict</th><th>Notes</th><th>By</th></tr>
+  {% for res in run.results %}
+  <tr>
+    <td>{{ res.name }}</td>
+    <td>{{ res.value if res.value is not none else (res.value_json | tojson if res.value_json else "—") }}</td>
+    <td>{{ res.verdict or "—" }}</td>
+    <td class="muted">{{ res.notes or "—" }}</td>
+    <td class="muted">{{ res.submitted_by }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="empty">No results yet</td></tr>
+  {% endfor %}
+</table>
+
+<h3>Artifacts</h3>
+<table>
+  <tr><th>Kind</th><th>URI</th><th></th></tr>
+  {% for a in run.artifacts %}
+  <tr>
+    <td>{{ a.kind }}</td>
+    <td class="muted">{{ a.uri }}</td>
+    <td><a href="/artifacts/{{ a.id }}/download">download</a></td>
+  </tr>
+  {% else %}
+  <tr><td colspan="3" class="empty">No artifacts yet</td></tr>
+  {% endfor %}
+</table>
+
+{% endblock %}

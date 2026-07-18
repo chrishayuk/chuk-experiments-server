@@ -36,7 +36,10 @@ def create_experiment(client: httpx.Client, payload: dict) -> dict | None:
         print(f"= '{payload['slug']}' already exists, skipping")
         return None
     if resp.status_code >= 400:
-        print(f"! failed to create experiment '{payload['slug']}': {resp.status_code} {resp.text}", file=sys.stderr)
+        print(
+            f"! failed to create experiment '{payload['slug']}': {resp.status_code} {resp.text}",
+            file=sys.stderr,
+        )
         return None
     return resp.json()
 
@@ -48,6 +51,8 @@ def create_run(client: httpx.Client, experiment_slug: str, payload: dict) -> dic
         print(f"= run '{payload.get('slug')}' on '{experiment_slug}' already exists, skipping")
         return None
     if resp.status_code >= 400:
-        print(f"! failed to create run on '{experiment_slug}': {resp.status_code} {resp.text}", file=sys.stderr)
+        print(
+            f"! failed to create run on '{experiment_slug}': {resp.status_code} {resp.text}", file=sys.stderr
+        )
         return None
     return resp.json()

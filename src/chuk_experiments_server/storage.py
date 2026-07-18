@@ -45,7 +45,9 @@ def presign_put(key: str, content_type: str | None = None) -> str:
     params = {"Bucket": settings.r2_bucket, "Key": key}
     if content_type:
         params["ContentType"] = content_type
-    return get_client().generate_presigned_url("put_object", Params=params, ExpiresIn=PRESIGN_PUT_EXPIRY_SECONDS)
+    return get_client().generate_presigned_url(
+        "put_object", Params=params, ExpiresIn=PRESIGN_PUT_EXPIRY_SECONDS
+    )
 
 
 def presign_get(key: str) -> str:

@@ -30,7 +30,9 @@ from _migrate_common import slugify
 _PROGRAMME_SLUG = "chuk-mlx"
 _WRITEUP_FILENAMES = ("EXPERIMENT.md", "RESULTS.md", "README.md")
 _TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-_TAKEAWAY_HEADING_RE = re.compile(r"^#+\s*(key takeaway|conclusions?|summary)\s*$", re.IGNORECASE | re.MULTILINE)
+_TAKEAWAY_HEADING_RE = re.compile(
+    r"^#+\s*(key takeaway|conclusions?|summary)\s*$", re.IGNORECASE | re.MULTILINE
+)
 
 
 def humanize(dirname: str) -> str:
@@ -93,7 +95,9 @@ def run_migration(root: Path, base_url: str, api_key: str | None, dry_run: bool)
         for exp_dir in experiment_dirs:
             title, body = build_writeup(exp_dir)
             takeaway = extract_takeaway(body)
-            print(f"  {exp_dir.name:35s} title={title!r} writeup_len={len(body)} takeaway={'yes' if takeaway else 'no'}")
+            print(
+                f"  {exp_dir.name:35s} title={title!r} writeup_len={len(body)} takeaway={'yes' if takeaway else 'no'}"
+            )
         return
 
     if not api_key:
@@ -125,7 +129,9 @@ def run_migration(root: Path, base_url: str, api_key: str | None, dry_run: bool)
         client.post(f"/v1/experiments/{slug}/writeups", json={"body_md": body})
 
         run = post_run(
-            client, slug, {"slug": "historical", "backend": "other", "config": {"path": path}, "status": "completed"}
+            client,
+            slug,
+            {"slug": "historical", "backend": "other", "config": {"path": path}, "status": "completed"},
         )
         if run and takeaway:
             client.post(f"/v1/runs/{run['id']}/results", json={"name": "summary", "notes": takeaway})
@@ -136,7 +142,9 @@ def run_migration(root: Path, base_url: str, api_key: str | None, dry_run: bool)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--source", type=Path, default=Path("../chuk-mlx/experiments"))
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--api-key", help="Bearer key with write scope (required unless --dry-run)")

@@ -265,6 +265,47 @@ async def run_artifacts(request: Request) -> Response:
     return _ok(await service.register_artifact(run_id, data), status=HTTPStatus.CREATED)
 
 
+@mcp.endpoint("/v1/runs/{run_id:int}/cancel", methods=["POST"])
+@_with_error_handling
+async def run_cancel(request: Request) -> Response:
+    """Dedicated action route (rather than PATCH .../{id} with status=cancelled)
+    because cancellation is guarded — only valid from queued/claimed — and a
+    dedicated route keeps that guard from being bypassable via the generic
+    status-setting PATCH."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    return _ok(await service.cancel_run(request.path_params["run_id"]))
+
+
+@mcp.endpoint("/v1/runs/compare", methods=["GET"])
+@_with_error_handling
+async def runs_compare(request: Request) -> Response:
+    params = request.query_params
+    await auth.require_scope_from_request(request, Scope.READ)
+    metric = params.get("metric")
+    run_ids = [int(v) for v in params.getlist("ids")]
+    if not run_ids or not metric:
+        return JSONResponse(
+            {"error": "provide 'ids' (repeatable) and 'metric' query parameters"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+    return _ok(await service.compare_runs(run_ids, metric))
+
+
+@mcp.endpoint("/v1/artifacts", methods=["GET"])
+@_with_error_handling
+async def artifacts_collection(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    params = request.query_params
+    return _ok(
+        await service.find_checkpoints(
+            experiment=params.get("experiment"),
+            model=params.get("model"),
+            kind=params.get("kind"),
+            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Artifacts — R2 presign/download (spec §4/§9). Reports itself as not
 # implemented if R2 secrets aren't set on this deployment, rather than

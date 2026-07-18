@@ -77,3 +77,84 @@ async def write_key(_clean_tables):
     raw = "test-key-" + auth.generate_key()
     await auth.upsert_bootstrap_key(f"pytest:read|write|admin:{raw}")
     return raw
+
+
+@pytest.fixture(scope="session")
+def asgi_app(_apply_schema):
+    """The real Starlette app built from whatever's registered in
+    chuk_mcp_server's endpoint registry at this point — importing rest.py
+    and web.py (whose @mcp.endpoint decorators fire at module-import time,
+    same two modules cli.py's _register_rest_routes imports) is what
+    populates it. No mcp.run(): that starts a real uvicorn listener, which
+    tests don't need — ASGI-transport requests below drive the exact same
+    routing/handler code in-process."""
+    from starlette.applications import Starlette
+
+    from chuk_experiments_server import rest, web  # noqa: F401 - import registers @mcp.endpoint routes
+    from chuk_mcp_server.endpoint_registry import http_endpoint_registry
+
+    return Starlette(routes=http_endpoint_registry.get_routes())
+
+
+@pytest.fixture
+async def api_client(asgi_app):
+    """An httpx client wired to the in-process ASGI app instead of a real
+    socket — used both for testing rest.py directly and as the transport
+    tools.py's internal client is pointed at in tests (see test_tools.py)."""
+    import httpx
+
+    transport = httpx.ASGITransport(app=asgi_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+async def tool_caller(api_client, write_key, monkeypatch):
+    """Wires internal_client (what tools.py forwards through) to the
+    in-process ASGI transport, and fakes auth.bearer_from_mcp_context() to
+    return `write_key` — standing in for chuk_mcp_server's ambient HTTP
+    context, which a plain pytest call doesn't have. Yields the raw key in
+    case a test wants to reference it (e.g. asserting submitted_by)."""
+    from chuk_experiments_server import auth, internal_client
+
+    internal_client.set_client(api_client)
+    monkeypatch.setattr(auth, "bearer_from_mcp_context", lambda: write_key)
+    yield write_key
+    internal_client.set_client(None)
+
+
+#: Deterministic dashboard-auth config for the whole session, regardless of
+#: whatever's (or isn't) in the real project .env — real Google credentials
+#: aren't needed since webauth.exchange_code_for_email is mocked in tests
+#: that exercise the OAuth callback, not called against the real Google API.
+_TEST_ALLOWED_EMAIL = "chrishayuk@googlemail.com"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _dashboard_auth_env():
+    os.environ.setdefault("SESSION_SECRET", "test-session-secret")
+    os.environ.setdefault("DASHBOARD_ALLOWED_EMAIL", _TEST_ALLOWED_EMAIL)
+    os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
+    os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
+    os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://test/auth/callback")
+
+
+@pytest.fixture
+async def dashboard_client(api_client, write_key, monkeypatch):
+    """Wires internal_client (what web.py forwards through) to the
+    in-process ASGI transport, and sets INTERNAL_API_KEY to a real
+    write-scoped key so the dashboard's own REST calls authenticate."""
+    from chuk_experiments_server import internal_client
+
+    monkeypatch.setenv("INTERNAL_API_KEY", write_key)
+    internal_client.set_client(api_client)
+    yield api_client
+    internal_client.set_client(None)
+
+
+@pytest.fixture
+def authenticated_cookies():
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+
+    return {SESSION_COOKIE_NAME: webauth.create_session_cookie_value(_TEST_ALLOWED_EMAIL)}

@@ -2,7 +2,13 @@ import pytest
 
 from chuk_experiments_server import service
 from chuk_experiments_server.constants import RunStatus
-from chuk_experiments_server.models import ArtifactCreate, ExperimentCreate, ResultCreate, RunCreate, RunUpdate
+from chuk_experiments_server.models import (
+    ArtifactCreate,
+    ExperimentCreate,
+    ResultCreate,
+    RunCreate,
+    RunUpdate,
+)
 
 
 async def _make_experiment(slug: str = "cn-7") -> None:
@@ -74,7 +80,9 @@ async def test_register_artifact_missing_run_raises_not_found():
 async def test_get_artifact_returns_registered_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
-    registered = await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+    registered = await service.register_artifact(
+        run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin")
+    )
 
     fetched = await service.get_artifact(registered.id)
     assert fetched.uri == "s3://bucket/ckpt.bin"

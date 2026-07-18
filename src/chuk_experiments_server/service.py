@@ -139,7 +139,7 @@ async def list_experiments(
                p.slug AS programme_slug, p.name AS programme_name
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
-        WHERE {' AND '.join(where)}
+        WHERE {" AND ".join(where)}
         ORDER BY e.updated_at DESC
         LIMIT {limit_param} OFFSET {offset_param}
         """,
@@ -206,7 +206,9 @@ async def create_experiment(data: ExperimentCreate) -> Experiment:
             data.tags,
         )
     except asyncpg.UniqueViolationError:
-        raise ConflictError(f"Experiment '{data.slug}' already exists in programme '{data.programme}'") from None
+        raise ConflictError(
+            f"Experiment '{data.slug}' already exists in programme '{data.programme}'"
+        ) from None
     return await get_experiment(row["slug"])
 
 
@@ -309,9 +311,7 @@ async def search_experiments(
     if query:
         query_param = bind(query)
         rank_expr = f"ts_rank(e.search, plainto_tsquery('english', {query_param}))"
-        snippet_expr = (
-            f"ts_headline('english', coalesce(e.hypothesis, e.title), plainto_tsquery('english', {query_param}))"
-        )
+        snippet_expr = f"ts_headline('english', coalesce(e.hypothesis, e.title), plainto_tsquery('english', {query_param}))"
         order_by = "rank DESC"
     else:
         rank_expr = "0"
@@ -326,7 +326,7 @@ async def search_experiments(
                {snippet_expr} AS snippet
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
-        WHERE {' AND '.join(where)}
+        WHERE {" AND ".join(where)}
         ORDER BY {order_by}
         LIMIT {limit_param}
         """,
@@ -521,7 +521,9 @@ _READY_CLAUSE = """
 """
 
 
-async def peek_queue(backend: str | None = None, max_seconds: int | None = None, limit: int = DEFAULT_LIST_LIMIT) -> list[Run]:
+async def peek_queue(
+    backend: str | None = None, max_seconds: int | None = None, limit: int = DEFAULT_LIST_LIMIT
+) -> list[Run]:
     """Read-only view of ready runs — does not claim anything."""
     pool = await get_pool()
     where = [_READY_CLAUSE]
@@ -533,7 +535,9 @@ async def peek_queue(backend: str | None = None, max_seconds: int | None = None,
 
     if backend:
         backend_param = bind(backend)
-        where.append(f"(r.requirements->>'backend' IS NULL OR r.requirements->>'backend' IN ('any', {backend_param}))")
+        where.append(
+            f"(r.requirements->>'backend' IS NULL OR r.requirements->>'backend' IN ('any', {backend_param}))"
+        )
     if max_seconds is not None:
         where.append(f"(r.est_seconds IS NULL OR r.est_seconds <= {bind(max_seconds)})")
 
@@ -541,7 +545,7 @@ async def peek_queue(backend: str | None = None, max_seconds: int | None = None,
     rows = await pool.fetch(
         f"""
         SELECT r.id FROM run r
-        WHERE {' AND '.join(where)}
+        WHERE {" AND ".join(where)}
         ORDER BY r.priority DESC, r.created_at
         LIMIT {limit_param}
         """,
@@ -755,7 +759,7 @@ async def find_checkpoints(
         FROM artifact a
         JOIN run r ON r.id = a.run_id
         JOIN experiment e ON e.id = r.experiment_id
-        WHERE {' AND '.join(where)}
+        WHERE {" AND ".join(where)}
         ORDER BY a.created_at DESC
         LIMIT {limit_param}
         """,

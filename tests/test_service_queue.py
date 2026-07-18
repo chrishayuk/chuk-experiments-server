@@ -31,7 +31,9 @@ async def test_peek_queue_orders_by_priority_then_age():
 
 async def test_peek_queue_filters_by_backend_requirement():
     await _make_experiment()
-    await service.enqueue_run(RunCreate(experiment="cn-7", slug="colab-only", requirements={"backend": "colab"}))
+    await service.enqueue_run(
+        RunCreate(experiment="cn-7", slug="colab-only", requirements={"backend": "colab"})
+    )
     await service.enqueue_run(RunCreate(experiment="cn-7", slug="any-backend", requirements={}))
 
     for_colab = await service.peek_queue(backend="colab")

@@ -10,3 +10,5 @@ build/
 .DS_Store
 uv.lock
 .wrangler/
+.coverage
+htmlcov/

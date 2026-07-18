@@ -81,7 +81,9 @@ async def _require_scope(raw_token: str | None, scope: Scope) -> ApiKey:
     if record is None:
         raise AuthError("Missing or invalid API key", status_code=HTTPStatus.UNAUTHORIZED)
     if not record.has_scope(scope):
-        raise AuthError(f"API key '{record.name}' lacks '{scope.value}' scope", status_code=HTTPStatus.FORBIDDEN)
+        raise AuthError(
+            f"API key '{record.name}' lacks '{scope.value}' scope", status_code=HTTPStatus.FORBIDDEN
+        )
     return record
 
 

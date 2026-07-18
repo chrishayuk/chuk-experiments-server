@@ -68,6 +68,27 @@ async def test_revoked_key_does_not_authenticate(write_key):
     assert await auth.authenticate(write_key) is None
 
 
+def test_bearer_from_mcp_context_reads_ambient_scope():
+    from chuk_mcp_server.context import clear_all, set_http_request
+
+    scope = {"headers": [(b"authorization", b"Bearer from-scope-token")]}
+    set_http_request(scope)
+    try:
+        assert auth.bearer_from_mcp_context() == "from-scope-token"
+    finally:
+        clear_all()
+
+
+def test_bearer_from_mcp_context_no_authorization_header():
+    from chuk_mcp_server.context import clear_all, set_http_request
+
+    set_http_request({"headers": [(b"x-other-header", b"value")]})
+    try:
+        assert auth.bearer_from_mcp_context() is None
+    finally:
+        clear_all()
+
+
 async def test_require_scope_from_tool_raises_on_missing_key():
     # No ambient HTTP request context during a plain pytest run, so
     # bearer_from_mcp_context() naturally returns None here — no mocking needed.

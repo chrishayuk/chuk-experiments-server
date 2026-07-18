@@ -266,7 +266,9 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--source", type=Path, default=Path("../chris-experiments/INDEX.md"))
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--api-key", help="Bearer key with write scope (required unless --dry-run)")

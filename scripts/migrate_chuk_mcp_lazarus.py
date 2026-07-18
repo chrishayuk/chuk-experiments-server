@@ -38,7 +38,19 @@ from _migrate_common import slugify
 
 _PROGRAMME_SLUG = "lazarus"
 _DEFAULT_SOURCE = Path.home() / ".chuk-lazarus" / "experiments"
-_NOISE_NAMES = {"test_exp", "my_exp", "exp1", "exp2", "exp3", "exp4", "exp5", "demo", "example", "experiment", "test"}
+_NOISE_NAMES = {
+    "test_exp",
+    "my_exp",
+    "exp1",
+    "exp2",
+    "exp3",
+    "exp4",
+    "exp5",
+    "demo",
+    "example",
+    "experiment",
+    "test",
+}
 _NOISE_TAG_SETS = ({"a", "b"}, {"tag1", "tag2"})
 
 
@@ -138,7 +150,10 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
                 "slug": slug,
                 "title": representative.name,
                 "hypothesis": build_hypothesis(group),
-                "design": {"model_id": representative.model_id, "lazarus_ids": [e.experiment_id for e in group]},
+                "design": {
+                    "model_id": representative.model_id,
+                    "lazarus_ids": [e.experiment_id for e in group],
+                },
                 "tags": build_tags(group),
                 "status": "completed",
             },
@@ -173,7 +188,9 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--source", type=Path, default=_DEFAULT_SOURCE)
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--api-key", help="Bearer key with write scope (required unless --dry-run)")

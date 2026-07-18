@@ -109,3 +109,52 @@ PRESIGN_PUT_EXPIRY_SECONDS = 900
 PRESIGN_GET_EXPIRY_SECONDS = 3600
 R2_SIGNATURE_VERSION = "s3v4"
 R2_REGION = "auto"
+
+# --- Dashboard auth (spec §8/§9 "website behind ... the read key") -----------
+# "Sign in with Google", restricted to one email — a browser session, not the
+# bearer-token API auth in auth.py (that's for REST/MCP clients, which can
+# set an Authorization header; a browser navigating between pages can't).
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+GOOGLE_OAUTH_SCOPE = "openid email profile"
+
+SESSION_COOKIE_NAME = "chuk_experiments_session"
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7  # 7 days
+OAUTH_STATE_COOKIE_NAME = "chuk_experiments_oauth_state"
+OAUTH_STATE_COOKIE_MAX_AGE_SECONDS = 600  # just needs to survive the redirect round-trip
+
+# --- Markdown rendering (write-up bodies) ------------------------------------
+
+#: Allowlist for sanitizing rendered write-up HTML — DB content isn't
+#: necessarily human-authored (agents can append_writeup too), so this is a
+#: real trust boundary, not just formatting.
+MARKDOWN_ALLOWED_TAGS = [
+    "p",
+    "br",
+    "hr",
+    "strong",
+    "em",
+    "code",
+    "pre",
+    "blockquote",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "a",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+    "img",
+]
+MARKDOWN_ALLOWED_ATTRIBUTES = {"a": ["href", "title"], "img": ["src", "alt", "title"]}
