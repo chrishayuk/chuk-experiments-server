@@ -35,6 +35,24 @@ CANCELLABLE_RUN_STATUSES = (RunStatus.QUEUED, RunStatus.CLAIMED)
 #: Statuses a lease can be renewed on — see service.renew_lease.
 LEASABLE_RUN_STATUSES = (RunStatus.CLAIMED, RunStatus.RUNNING)
 
+#: Dashboard status-pill color class ("good"/"run"/"warn"/"bad"/"mut") —
+#: matches the shared gpu-training-harness dashboard's status-color
+#: convention, so the two sibling dashboards read consistently.
+STATUS_CSS_CLASS: dict[str, str] = {
+    ExperimentStatus.DRAFT.value: "mut",
+    ExperimentStatus.PLANNED.value: "mut",
+    ExperimentStatus.RUNNING.value: "run",
+    ExperimentStatus.COMPLETED.value: "good",
+    ExperimentStatus.ABANDONED.value: "bad",
+    ExperimentStatus.SUPERSEDED.value: "mut",
+    RunStatus.QUEUED.value: "mut",
+    RunStatus.CLAIMED.value: "run",
+    RunStatus.FAILED.value: "bad",
+    RunStatus.KILLED.value: "bad",
+    RunStatus.LOST.value: "bad",
+    RunStatus.CANCELLED.value: "mut",
+}
+
 
 class Verdict(str, Enum):
     PASS = "pass"
@@ -121,6 +139,11 @@ PRESIGN_PUT_EXPIRY_SECONDS = 900
 PRESIGN_GET_EXPIRY_SECONDS = 3600
 R2_SIGNATURE_VERSION = "s3v4"
 R2_REGION = "auto"
+
+#: Artifact URIs pointing at a Drive folder archived by
+#: scripts/archive_*_to_drive.py — pointer/scheme-agnostic alongside R2's
+#: s3:// scheme, per ROADMAP.md's Google Drive archival phase.
+GDRIVE_URI_PREFIX = "gdrive://"
 
 # --- Dashboard auth (spec §8/§9 "website behind ... the read key") -----------
 # "Sign in with Google", restricted to one email — a browser session, not the

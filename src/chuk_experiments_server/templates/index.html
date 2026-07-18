@@ -22,7 +22,7 @@
   <tr>
     <td><a href="/experiments/{{ e.slug }}">{{ e.title }}</a></td>
     <td>{{ e.programme_slug }}</td>
-    <td><span class="status status-{{ e.status }}">{{ e.status }}</span></td>
+    <td><span class="st {{ e.status | status_class }}">{{ e.status }}</span></td>
     <td class="muted">{{ e.updated_at | fmt_dt }}</td>
   </tr>
   {% else %}

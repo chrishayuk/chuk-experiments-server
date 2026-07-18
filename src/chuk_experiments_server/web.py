@@ -24,6 +24,7 @@ from .constants import (
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
+    STATUS_CSS_CLASS,
 )
 from .markdown_render import render as render_markdown
 from .server import mcp
@@ -40,7 +41,15 @@ def _format_datetime(value: str | None) -> str:
     return value[:16].replace("T", " ")
 
 
+def _status_class(status: str) -> str:
+    """Maps a status string to a dashboard status-pill CSS class — see
+    STATUS_CSS_CLASS. Unrecognized statuses fall back to "mut" (muted/grey)
+    rather than raising, since this only affects display color."""
+    return STATUS_CSS_CLASS.get(status, "mut")
+
+
 _templates.env.filters["fmt_dt"] = _format_datetime
+_templates.env.filters["status_class"] = _status_class
 
 
 class DashboardAPIError(Exception):
@@ -68,7 +77,11 @@ def _render(request: Request, name: str, context: dict[str, Any]) -> HTMLRespons
 def _dashboard_route(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
     @wraps(handler)
     async def wrapped(request: Request) -> Response:
-        if not webauth.is_authenticated(request):
+        # Google sign-in only gates the dashboard once it's actually
+        # configured (Fly secrets in production) — local dev has no Google
+        # credentials set, so it gets open access rather than a dead-end
+        # "sign-in not configured" redirect loop.
+        if settings.dashboard_auth_configured and not webauth.is_authenticated(request):
             return RedirectResponse("/login", status_code=HTTPStatus.FOUND.value)
         try:
             return await handler(request)
@@ -229,9 +242,10 @@ async def search_page(request: Request) -> Response:
 @mcp.endpoint("/artifacts/{artifact_id:int}/download", methods=["GET"])
 @_dashboard_route
 async def artifact_download_redirect(request: Request) -> Response:
-    """Proxies the REST API's own presign redirect: a browser can't attach
+    """Proxies the REST API's own download redirect (a presigned R2 URL, or
+    a Drive folder link for an archived artifact): a browser can't attach
     the internal bearer token itself, so this server makes that call and
-    forwards the resulting R2 URL as its own redirect instead."""
+    forwards the resulting URL as its own redirect instead."""
     client = internal_client.get_client()
     resp = await client.get(
         f"/v1/artifacts/{request.path_params['artifact_id']}/download",

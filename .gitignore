@@ -12,3 +12,6 @@ uv.lock
 .wrangler/
 .coverage
 htmlcov/
+.drive_credentials.json
+.drive_token.json
+scripts/.drive_manifest_*.json

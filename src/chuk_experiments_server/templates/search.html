@@ -16,7 +16,7 @@
   <tr>
     <td><a href="/experiments/{{ hit.slug }}">{{ hit.title }}</a></td>
     <td>{{ hit.programme_slug }}</td>
-    <td><span class="status status-{{ hit.status }}">{{ hit.status }}</span></td>
+    <td><span class="st {{ hit.status | status_class }}">{{ hit.status }}</span></td>
     <td class="muted">{{ hit.snippet | safe }}</td>
   </tr>
   {% else %}

@@ -18,7 +18,13 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from . import auth, service, storage
 from .config import settings
-from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, PRESIGN_PUT_EXPIRY_SECONDS, Scope
+from .constants import (
+    DEFAULT_LIST_LIMIT,
+    DEFAULT_SEARCH_LIMIT,
+    GDRIVE_URI_PREFIX,
+    PRESIGN_PUT_EXPIRY_SECONDS,
+    Scope,
+)
 from .errors import error_payload
 from .models import (
     ArtifactCreate,
@@ -340,9 +346,23 @@ async def run_artifacts_presign(request: Request) -> Response:
 @_with_error_handling
 async def artifact_download(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.READ)
+    artifact = await service.get_artifact(request.path_params["artifact_id"])
+
+    if artifact.uri.startswith(GDRIVE_URI_PREFIX):
+        # Archived by scripts/archive_*_to_drive.py — no presigning needed,
+        # the folder link is already there in meta (drive.file scope means
+        # only the archiving Google account can view it, which is the same
+        # account the dashboard's Google sign-in is restricted to).
+        drive_url = artifact.meta.get("drive_url")
+        if not drive_url:
+            return JSONResponse(
+                {"error": "artifact has no drive_url in meta"},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            )
+        return RedirectResponse(drive_url, status_code=HTTPStatus.FOUND.value)
+
     if not settings.r2_configured:
         return JSONResponse(_R2_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
 
-    artifact = await service.get_artifact(request.path_params["artifact_id"])
     download_url = storage.presign_get(storage.key_from_uri(artifact.uri))
     return RedirectResponse(download_url, status_code=HTTPStatus.FOUND.value)

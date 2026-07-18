@@ -6,54 +6,87 @@
 <title>{% block title %}chuk-experiments{% endblock %}</title>
 <style>
   :root {
-    color-scheme: light dark;
-    --fg: #1a1a1a; --bg: #ffffff; --muted: #666; --border: #ddd;
-    --accent: #2563eb; --card: #f7f7f8; --code-bg: #f1f1f3;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #e4e4e7; --bg: #131316; --muted: #9a9aa2; --border: #2c2c33;
-             --accent: #6d9dff; --card: #1c1c22; --code-bg: #1f1f26; }
+    --plane:#0d0d0d; --surface:#1a1a19; --surface2:#212120; --ink:#f4f3ee; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --ring:rgba(255,255,255,.10); --ring2:rgba(255,255,255,.16);
+    --good:#22b45a; --warning:#fab219; --serious:#ec835a; --critical:#e0483d;
+    --accent:#3987e5; --accent2:#2bb1a8;
+    --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans: system-ui,-apple-system,"Segoe UI",sans-serif;
   }
   * { box-sizing: border-box; }
+  html, body { margin: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: var(--fg); background: var(--bg); margin: 0; line-height: 1.5;
+    font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    color: var(--ink); background: var(--plane); -webkit-font-smoothing: antialiased;
   }
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  h2, h3 { font-weight: 650; }
+  .mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
   header {
-    display: flex; align-items: center; gap: 1.5rem;
-    padding: 0.85rem 1.5rem; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: .9rem; padding: .85rem 1.4rem;
+    border-bottom: 1px solid var(--ring); position: sticky; top: 0;
+    background: rgba(13,13,13,.86); backdrop-filter: blur(8px); z-index: 20;
   }
-  header .brand { font-weight: 600; }
-  header nav { display: flex; gap: 1rem; flex: 1; }
-  header .user { color: var(--muted); font-size: 0.9rem; }
-  main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
-  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; }
-  tr:hover { background: var(--card); }
-  .card { background: var(--card); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
-  .tag {
-    display: inline-block; font-size: 0.75rem; padding: 0.1rem 0.5rem;
-    border-radius: 999px; background: var(--code-bg); color: var(--muted); margin: 0.1rem;
+  header .brand { font-weight: 700; letter-spacing: .02em; }
+  header .brand b { color: var(--accent); }
+  header .tag { color: var(--muted); font-size: .82rem; }
+  header nav { display: flex; gap: 1rem; }
+  header .spacer { flex: 1; }
+  header .user { color: var(--muted); font-size: .82rem; }
+  header .user a { color: var(--muted); }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 1.4rem 1.4rem 3rem; }
+
+  table { border-collapse: collapse; width: 100%; margin: .9rem 0; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid var(--grid); }
+  th { color: var(--muted); font-weight: 600; font-size: .7rem; letter-spacing: .05em; text-transform: uppercase; }
+  tr:hover td { background: var(--surface2); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--ring); border-radius: 12px;
+    padding: 1rem 1.2rem; margin-bottom: 1rem;
   }
-  .status { font-weight: 600; }
-  .status-completed { color: #16a34a; }
-  .status-running, .status-claimed, .status-queued { color: #d97706; }
-  .status-failed, .status-killed, .status-lost, .status-abandoned { color: #dc2626; }
-  .status-cancelled, .status-superseded { color: var(--muted); }
+  .card > strong { display: block; font-size: .7rem; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin-bottom: .5rem; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: .35rem; font-family: var(--mono); font-size: .74rem;
+    background: var(--surface2); border: 1px solid var(--ring); border-radius: 999px;
+    padding: .12rem .55rem; color: var(--ink2); margin: .1rem;
+  }
+  .chip.r2 { color: var(--serious); border-color: var(--serious); }
+  .chip.drive { color: var(--accent2); border-color: var(--accent2); }
+  .tag { display: inline-block; font-size: .74rem; padding: .12rem .55rem; border-radius: 999px;
+    background: var(--surface2); border: 1px solid var(--ring); color: var(--ink2); margin: .1rem; }
+
+  .st { display: inline-flex; align-items: center; gap: .42rem; font-size: .85rem; white-space: nowrap; }
+  .st::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--muted); flex: none; }
+  .st.good::before { background: var(--good); }
+  .st.run::before { background: var(--accent); }
+  .st.bad::before { background: var(--critical); }
+  .st.warn::before { background: var(--warning); }
+  .st.mut::before { background: var(--muted); }
+
   input, select, button {
-    font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--bg); color: var(--fg);
+    font: inherit; padding: .4rem .6rem; border: 1px solid var(--ring2);
+    border-radius: 7px; background: var(--surface); color: var(--ink);
   }
   button, .button {
-    background: var(--accent); color: white; border: none; cursor: pointer;
+    background: var(--accent); color: #0d0d0d; font-weight: 600; border: none; cursor: pointer;
+    border-radius: 8px;
   }
-  form.filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
-  .writeup { max-width: 75ch; }
-  .writeup pre { background: var(--code-bg); padding: 0.75rem; border-radius: 6px; overflow-x: auto; }
-  .writeup code { background: var(--code-bg); padding: 0.1rem 0.3rem; border-radius: 4px; }
+  button:hover, .button:hover { text-decoration: none; filter: brightness(1.1); }
+  form.filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+
+  .writeup { max-width: 75ch; color: var(--ink2); }
+  .writeup pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px; overflow-x: auto; }
+  .writeup code { background: var(--surface2); padding: .1rem .3rem; border-radius: 4px; font-family: var(--mono); }
+  pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px;
+    overflow-x: auto; font-family: var(--mono); font-size: .82rem; color: var(--ink2); }
+
   .muted { color: var(--muted); }
   .empty { color: var(--muted); font-style: italic; padding: 2rem 0; text-align: center; }
 </style>
@@ -61,12 +94,13 @@
 </head>
 <body>
 <header>
-  <span class="brand">chuk-experiments</span>
+  <span class="brand">chuk-<b>experiments</b></span><span class="tag">research registry</span>
   <nav>
     <a href="/">Overview</a>
     <a href="/experiments">Experiments</a>
     <a href="/search">Search</a>
   </nav>
+  <span class="spacer"></span>
   {% if user_email %}
     <span class="user">{{ user_email }} · <a href="/logout">Sign out</a></span>
   {% endif %}

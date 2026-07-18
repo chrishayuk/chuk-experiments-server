@@ -26,6 +26,17 @@ async def test_overview_redirects_when_unauthenticated(dashboard_client):
     assert resp.headers["location"] == "/login"
 
 
+async def test_overview_open_access_when_dashboard_auth_not_configured(dashboard_client, monkeypatch):
+    """Google sign-in only gates the dashboard once it's actually
+    configured (Fly secrets in production) — local dev, with no Google
+    credentials set, gets straight in rather than a dead-end redirect to a
+    /login page that itself can't be used."""
+    monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: False))
+    resp = await dashboard_client.get("/")
+    assert resp.status_code == HTTPStatus.OK
+    assert "Programmes" in resp.text
+
+
 async def test_overview_renders_when_authenticated(dashboard_client, authenticated_cookies):
     resp = await dashboard_client.get("/", cookies=authenticated_cookies)
     assert resp.status_code == HTTPStatus.OK
@@ -258,7 +269,10 @@ async def test_artifact_download_redirects_to_presigned_url(
     assert resp.headers["location"] == "https://fake-r2/signed-get"
 
 
-async def test_artifact_download_surfaces_api_error(dashboard_client, authenticated_cookies, monkeypatch):
+async def test_artifact_download_surfaces_api_error(
+    dashboard_client, write_key, authenticated_cookies, monkeypatch
+):
+    artifact_id = await _create_run_with_artifact(dashboard_client, write_key)
     monkeypatch.setattr(type(settings), "r2_configured", property(lambda self: False))
-    resp = await dashboard_client.get("/artifacts/1/download", cookies=authenticated_cookies)
+    resp = await dashboard_client.get(f"/artifacts/{artifact_id}/download", cookies=authenticated_cookies)
     assert resp.status_code == HTTPStatus.BAD_GATEWAY

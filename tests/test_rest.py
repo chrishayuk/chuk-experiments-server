@@ -201,8 +201,18 @@ async def test_artifacts_presign_not_configured(api_client, write_key, monkeypat
 async def test_artifact_download_not_configured(api_client, write_key, monkeypatch):
     from chuk_experiments_server.config import settings
 
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "checkpoint", "uri": "s3://bucket/ckpt.bin"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
     monkeypatch.setattr(type(settings), "r2_configured", property(lambda self: False))
-    resp = await api_client.get("/v1/artifacts/1/download", headers=_auth(write_key))
+    resp = await api_client.get(f"/v1/artifacts/{artifact_id}/download", headers=_auth(write_key))
     assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
 
 
@@ -251,6 +261,35 @@ async def test_artifact_download_configured_redirects(api_client, write_key, mon
     )
     assert resp.status_code == HTTPStatus.FOUND
     assert resp.headers["location"] == "https://fake-r2/signed-get"
+
+
+async def test_artifact_download_gdrive_redirects_without_r2(api_client, write_key, monkeypatch):
+    """A Drive-archived artifact (scripts/archive_*_to_drive.py) redirects
+    straight to its stored drive_url — no presigning, no R2 configuration
+    required at all, unlike an s3:// artifact."""
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "r2_configured", property(lambda self: False))
+
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={
+                "kind": "other",
+                "uri": "gdrive://abc123",
+                "meta": {"drive_url": "https://drive.google.com/drive/folders/abc123"},
+            },
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.get(
+        f"/v1/artifacts/{artifact_id}/download", headers=_auth(write_key), follow_redirects=False
+    )
+    assert resp.status_code == HTTPStatus.FOUND
+    assert resp.headers["location"] == "https://drive.google.com/drive/folders/abc123"
 
 
 async def test_runs_compare(api_client, write_key):

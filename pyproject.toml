@@ -38,6 +38,13 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.3.0",
 ]
+# Only needed for the one-off scripts/archive_*_to_drive.py migration
+# scripts, not the running server — kept out of the base dependency list
+# so the deployed image doesn't carry Google API client libraries.
+archive = [
+    "google-auth>=2.23.0",
+    "google-api-python-client>=2.100.0",
+]
 
 [project.scripts]
 chuk-experiments-server = "chuk_experiments_server.cli:main"

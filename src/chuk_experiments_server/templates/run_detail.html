@@ -2,9 +2,9 @@
 {% block title %}{{ run.slug }} — chuk-experiments{% endblock %}
 {% block content %}
 
-<p class="muted"><a href="/experiments/{{ run.experiment_slug }}">{{ run.experiment_title }}</a> / {{ run.slug }}</p>
-<h2>Run: {{ run.slug }}</h2>
-<p><span class="status status-{{ run.status }}">{{ run.status }}</span></p>
+<p class="muted"><a href="/experiments/{{ run.experiment_slug }}">{{ run.experiment_title }}</a> / <span class="mono">{{ run.slug }}</span></p>
+<h2 class="mono">{{ run.slug }}</h2>
+<p><span class="st {{ run.status | status_class }}">{{ run.status }}</span></p>
 
 <div class="card">
   <table>
@@ -43,15 +43,22 @@
 
 <h3>Artifacts</h3>
 <table>
-  <tr><th>Kind</th><th>URI</th><th></th></tr>
+  <tr><th>Kind</th><th>Location</th><th>Path</th><th></th></tr>
   {% for a in run.artifacts %}
   <tr>
     <td>{{ a.kind }}</td>
-    <td class="muted">{{ a.uri }}</td>
+    {% if a.uri.startswith("gdrive://") %}
+    <td><span class="chip drive">Drive · archive</span></td>
+    <td class="muted mono">{{ a.meta.source_path or a.uri }}</td>
+    <td><a href="/artifacts/{{ a.id }}/download" target="_blank" rel="noopener">open in Drive</a></td>
+    {% else %}
+    <td><span class="chip r2">R2</span></td>
+    <td class="muted mono">{{ a.uri }}</td>
     <td><a href="/artifacts/{{ a.id }}/download">download</a></td>
+    {% endif %}
   </tr>
   {% else %}
-  <tr><td colspan="3" class="empty">No artifacts yet</td></tr>
+  <tr><td colspan="4" class="empty">No artifacts yet</td></tr>
   {% endfor %}
 </table>
 

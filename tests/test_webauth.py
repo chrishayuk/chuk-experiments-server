@@ -76,6 +76,17 @@ def test_get_authenticated_email_valid_cookie():
     assert webauth.get_authenticated_email(request) == "chris@example.com"
 
 
+def test_get_authenticated_email_missing_session_secret_returns_none(monkeypatch):
+    """SESSION_SECRET not being configured at all (e.g. local dev, with
+    dashboard auth not set up) must not crash page rendering — any cookie
+    present is necessarily stale/foreign, since this server could never
+    have signed one without a secret to sign it with."""
+    token = webauth.create_session_cookie_value("chris@example.com")
+    monkeypatch.delenv("SESSION_SECRET", raising=False)
+    request = _FakeRequest({SESSION_COOKIE_NAME: token})
+    assert webauth.get_authenticated_email(request) is None
+
+
 def test_is_authenticated_matches_allowed_email():
     token = webauth.create_session_cookie_value(settings.dashboard_allowed_email)
     request = _FakeRequest({SESSION_COOKIE_NAME: token})

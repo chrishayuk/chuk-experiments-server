@@ -5,7 +5,7 @@
 <p class="muted"><a href="/experiments?programme={{ experiment.programme_slug }}">{{ experiment.programme_name }}</a> / {{ experiment.slug }}</p>
 <h2>{{ experiment.title }}</h2>
 <p>
-  <span class="status status-{{ experiment.status }}">{{ experiment.status }}</span>
+  <span class="st {{ experiment.status | status_class }}">{{ experiment.status }}</span>
   {% for t in experiment.tags %}<span class="tag">{{ t }}</span>{% endfor %}
 </p>
 
@@ -35,8 +35,8 @@
   <tr><th>Run</th><th>Status</th><th>Backend</th><th>Cost</th><th>W&amp;B</th></tr>
   {% for r in experiment.runs %}
   <tr>
-    <td><a href="/runs/{{ r.id }}">{{ r.slug }}</a></td>
-    <td><span class="status status-{{ r.status }}">{{ r.status }}</span></td>
+    <td><a href="/runs/{{ r.id }}" class="mono">{{ r.slug }}</a></td>
+    <td><span class="st {{ r.status | status_class }}">{{ r.status }}</span></td>
     <td>{{ r.backend or "—" }}</td>
     <td>{{ "$%.4f"|format(r.cost_usd) if r.cost_usd is not none else "—" }}</td>
     <td>{% if r.wandb_url %}<a href="{{ r.wandb_url }}">dashboard</a>{% else %}—{% endif %}</td>

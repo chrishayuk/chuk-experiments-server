@@ -57,7 +57,16 @@ def create_session_cookie_value(email: str) -> str:
 
 def get_authenticated_email(request: Request) -> str | None:
     token = request.cookies.get(SESSION_COOKIE_NAME)
-    return _verify(token) if token else None
+    if not token:
+        return None
+    try:
+        return _verify(token)
+    except RuntimeError:
+        # SESSION_SECRET isn't configured (e.g. local dev, where dashboard
+        # auth isn't set up at all) — no way a valid session cookie could
+        # have been minted without it, so a cookie showing up here is
+        # stale/foreign, not a crash-worthy condition.
+        return None
 
 
 def is_authenticated(request: Request) -> bool:
