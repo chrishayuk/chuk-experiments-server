@@ -36,8 +36,11 @@ class Settings:
         return Path(__file__).resolve().parent.parent.parent / "migrations"
 
     # --- R2 / object storage (spec §9, Phase 2) -----------------------------
-    # Shared with gpu-training-harness's artifact bucket rather than a
-    # dedicated one — see CHUK_TRAIN_ARTIFACTS in that project's fly.toml.
+    # Own dedicated bucket ("chuk-experiments"), same Cloudflare account as
+    # gpu-training-harness but a separate bucket and a separate R2 API token
+    # scoped only to it — training-harness artifacts (bucket "chuk-train",
+    # see CHUK_TRAIN_ARTIFACTS in that project's fly.toml) live apart from
+    # this server's, on purpose.
 
     @property
     def r2_bucket(self) -> str | None:
