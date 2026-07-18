@@ -91,6 +91,9 @@
   button:hover, .button:hover { text-decoration: none; filter: brightness(1.1); }
   form.filters { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
 
+  .pager { display: flex; align-items: center; gap: .9rem; margin: .9rem 0; font-size: .85rem; }
+  .pager span.muted { font-family: var(--mono); }
+
   .writeup { max-width: 75ch; color: var(--ink2); }
   .writeup pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px; overflow-x: auto; }
   .writeup code { background: var(--surface2); padding: .1rem .3rem; border-radius: 4px; font-family: var(--mono); }
@@ -136,6 +139,25 @@ async function api(path){
   return body;
 }
 
+/* Fixed page size, real offset-based paging (not a growing "load more") —
+   each page issues its own bounded query so page 20 costs the same as
+   page 1. Fetches PAGE_SIZE+1 rows to detect a next page without a
+   separate count query. */
+const PAGE_SIZE=25;
+function pagerHtml(hashPath,baseParams,offset,count,hasMore){
+  const prevParams=new URLSearchParams(baseParams);
+  prevParams.set("offset",String(Math.max(0,offset-PAGE_SIZE)));
+  const nextParams=new URLSearchParams(baseParams);
+  nextParams.set("offset",String(offset+PAGE_SIZE));
+  const from=count?offset+1:0;
+  const to=offset+count;
+  return `<div class="pager">
+    ${offset>0?`<a href="#${hashPath}?${prevParams}">&larr; Prev</a>`:`<span class="muted">&larr; Prev</span>`}
+    <span class="muted">${from}&ndash;${to}</span>
+    ${hasMore?`<a href="#${hashPath}?${nextParams}">Next &rarr;</a>`:`<span class="muted">Next &rarr;</span>`}
+  </div>`;
+}
+
 /* ---------------- overview ---------------- */
 async function loadOverview(){
   let programmes,recent,running;
@@ -179,30 +201,29 @@ async function loadExperimentsList(params){
   const programme=params.get("programme")||"";
   const status=params.get("status")||"";
   const tag=params.get("tag")||"";
-  const limit=parseInt(params.get("limit")||"50",10);
+  const offset=Math.max(0,parseInt(params.get("offset")||"0",10)||0);
 
   let experiments,programmes;
   try{
-    const apiParams=new URLSearchParams({limit:String(limit+1)});
+    const apiParams=new URLSearchParams({limit:String(PAGE_SIZE+1),offset:String(offset)});
     if(programme)apiParams.set("programme",programme);
     if(status)apiParams.set("status",status);
     if(tag)apiParams.set("tag",tag);
     [experiments,programmes]=await Promise.all([api("/v1/experiments?"+apiParams),api("/v1/programmes")]);
   }catch(e){$("#app").innerHTML=`<p class="err">Failed to load experiments: ${esc(e.message)}</p>`;return;}
 
-  const hasMore=experiments.length>limit;
-  experiments=experiments.slice(0,limit);
+  const hasMore=experiments.length>PAGE_SIZE;
+  experiments=experiments.slice(0,PAGE_SIZE);
 
   const progOptions=programmes.map(p=>`<option value="${esc(p.slug)}" ${p.slug===programme?"selected":""}>${esc(p.name)}</option>`).join("");
   const statusOptions=EXPERIMENT_STATUSES.map(s=>`<option value="${s}" ${s===status?"selected":""}>${s}</option>`).join("");
   const rows=experiments.map(e=>`<tr><td><a href="#/experiments/${encodeURIComponent(e.slug)}">${esc(e.title)}</a></td><td>${esc(e.programme_slug)}</td><td>${pill(e.status)}</td><td>${(e.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</td><td class="muted">${fmtDt(e.updated_at)}</td></tr>`).join("")
     ||`<tr><td colspan="5" class="empty">No experiments match these filters</td></tr>`;
 
-  const nextParams=new URLSearchParams();
-  if(programme)nextParams.set("programme",programme);
-  if(status)nextParams.set("status",status);
-  if(tag)nextParams.set("tag",tag);
-  nextParams.set("limit",String(limit+50));
+  const baseParams=new URLSearchParams();
+  if(programme)baseParams.set("programme",programme);
+  if(status)baseParams.set("status",status);
+  if(tag)baseParams.set("tag",tag);
 
   $("#app").innerHTML=`
     <h2>Experiments</h2>
@@ -214,7 +235,7 @@ async function loadExperimentsList(params){
       ${(programme||status||tag)?`<a href="#/experiments">Clear</a>`:""}
     </form>
     <table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Tags</th><th>Updated</th></tr>${rows}</table>
-    <p class="muted">${hasMore?`Showing ${experiments.length} — <a href="#/experiments?${nextParams}">next page</a>`:`${experiments.length} experiment${experiments.length!==1?"s":""}`}</p>
+    ${pagerHtml("/experiments",baseParams,offset,experiments.length,hasMore)}
   `;
   $("#filter-form").addEventListener("submit",ev=>{
     ev.preventDefault();
@@ -294,13 +315,19 @@ async function loadRunDetail(id){
 /* ---------------- search ---------------- */
 async function loadSearch(params){
   const q=params.get("q")||"";
-  let hits=[];
+  const offset=Math.max(0,parseInt(params.get("offset")||"0",10)||0);
+  let hits=[],hasMore=false;
   if(q){
-    try{hits=await api("/v1/search?"+new URLSearchParams({q,limit:"20"}));}
+    try{hits=await api("/v1/search?"+new URLSearchParams({q,limit:String(PAGE_SIZE+1),offset:String(offset)}));}
     catch(e){$("#app").innerHTML=`<p class="err">${esc(e.message)}</p>`;return;}
+    hasMore=hits.length>PAGE_SIZE;
+    hits=hits.slice(0,PAGE_SIZE);
   }
   const rows=hits.map(h=>`<tr><td><a href="#/experiments/${encodeURIComponent(h.slug)}">${esc(h.title)}</a></td><td>${esc(h.programme_slug)}</td><td>${pill(h.status)}</td><td class="muted">${h.snippet}</td></tr>`).join("")
     ||(q?`<tr><td colspan="4" class="empty">No matches for "${esc(q)}"</td></tr>`:"");
+
+  const baseParams=new URLSearchParams();
+  if(q)baseParams.set("q",q);
 
   $("#app").innerHTML=`
     <h2>Search</h2>
@@ -308,7 +335,7 @@ async function loadSearch(params){
       <input type="text" name="q" placeholder="free-text query" value="${esc(q)}" autofocus>
       <button type="submit">Search</button>
     </form>
-    ${q?`<table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Snippet</th></tr>${rows}</table>`:`<p class="muted">Full-text search across experiment titles, hypotheses, and write-ups.</p>`}
+    ${q?`<table><tr><th>Experiment</th><th>Programme</th><th>Status</th><th>Snippet</th></tr>${rows}</table>${pagerHtml("/search",baseParams,offset,hits.length,hasMore)}`:`<p class="muted">Full-text search across experiment titles, hypotheses, and write-ups.</p>`}
   `;
   $("#search-form").addEventListener("submit",ev=>{
     ev.preventDefault();

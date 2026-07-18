@@ -178,6 +178,7 @@ async def search(request: Request) -> Response:
             metric_op=op,
             metric_value=float(value) if value is not None else None,
             limit=int(params.get("limit", DEFAULT_SEARCH_LIMIT)),
+            offset=int(params.get("offset", 0)),
         )
     )
 

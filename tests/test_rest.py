@@ -133,6 +133,27 @@ async def test_search_by_query(api_client, write_key):
     assert [h["slug"] for h in resp.json()] == ["cn-7"]
 
 
+async def test_search_offset_paginates_past_the_first_page(api_client, write_key):
+    """The dashboard SPA pages search results via limit+offset (no separate
+    count query) — confirm offset actually advances past already-seen rows
+    rather than being silently ignored."""
+    for i in range(3):
+        await _create_experiment(api_client, write_key, slug=f"cn-{i}", status="running")
+
+    first_page = await api_client.get(
+        "/v1/search", params={"status": "running", "limit": 2}, headers=_auth(write_key)
+    )
+    second_page = await api_client.get(
+        "/v1/search", params={"status": "running", "limit": 2, "offset": 2}, headers=_auth(write_key)
+    )
+    assert first_page.status_code == second_page.status_code == HTTPStatus.OK
+    first_slugs = [h["slug"] for h in first_page.json()]
+    second_slugs = [h["slug"] for h in second_page.json()]
+    assert len(first_slugs) == 2
+    assert len(second_slugs) == 1
+    assert not set(first_slugs) & set(second_slugs)
+
+
 async def test_index(api_client, write_key):
     await _create_experiment(api_client, write_key)
     resp = await api_client.get("/v1/index", headers=_auth(write_key))

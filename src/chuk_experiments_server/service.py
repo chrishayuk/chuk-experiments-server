@@ -294,6 +294,7 @@ async def search_experiments(
     metric_op: str | None = None,
     metric_value: float | None = None,
     limit: int = DEFAULT_SEARCH_LIMIT,
+    offset: int = 0,
 ) -> list[SearchHit]:
     """FTS (`query`) combinable with structured filters (spec §5a): programme/
     status/tags narrow by metadata, `config_key`/`config_value` matches a
@@ -345,6 +346,7 @@ async def search_experiments(
         order_by = "e.updated_at DESC"
 
     limit_param = bind(limit)
+    offset_param = bind(offset)
     rows = await pool.fetch(
         f"""
         SELECT e.slug, e.title, e.status, p.slug AS programme_slug,
@@ -354,7 +356,7 @@ async def search_experiments(
         JOIN programme p ON p.id = e.programme_id
         WHERE {" AND ".join(where)}
         ORDER BY {order_by}
-        LIMIT {limit_param}
+        LIMIT {limit_param} OFFSET {offset_param}
         """,
         *params,
     )
