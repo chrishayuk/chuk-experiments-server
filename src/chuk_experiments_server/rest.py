@@ -223,8 +223,27 @@ async def queue_sweep(request: Request) -> Response:
 # Runs
 # ---------------------------------------------------------------------------
 
+# /v1/runs/compare must be registered before /v1/runs/{run_id} — routes are
+# matched in registration order, and since run_id has no type converter
+# (plain string ids now), "compare" would otherwise match {run_id} first.
 
-@mcp.endpoint("/v1/runs/{run_id:int}", methods=["GET", "PATCH"])
+
+@mcp.endpoint("/v1/runs/compare", methods=["GET"])
+@_with_error_handling
+async def runs_compare(request: Request) -> Response:
+    params = request.query_params
+    await auth.require_scope_from_request(request, Scope.READ)
+    metric = params.get("metric")
+    run_ids = params.getlist("ids")
+    if not run_ids or not metric:
+        return JSONResponse(
+            {"error": "provide 'ids' (repeatable) and 'metric' query parameters"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+    return _ok(await service.compare_runs(run_ids, metric))
+
+
+@mcp.endpoint("/v1/runs/{run_id}", methods=["GET", "PATCH"])
 @_with_error_handling
 async def run_detail(request: Request) -> Response:
     run_id = request.path_params["run_id"]
@@ -237,7 +256,7 @@ async def run_detail(request: Request) -> Response:
     return _ok(await service.update_run(run_id, data))
 
 
-@mcp.endpoint("/v1/runs/{run_id:int}/lease", methods=["POST"])
+@mcp.endpoint("/v1/runs/{run_id}/lease", methods=["POST"])
 @_with_error_handling
 async def run_lease(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)
@@ -247,7 +266,7 @@ async def run_lease(request: Request) -> Response:
     return _ok(await service.renew_lease(run_id, data.lease_seconds))
 
 
-@mcp.endpoint("/v1/runs/{run_id:int}/results", methods=["POST"])
+@mcp.endpoint("/v1/runs/{run_id}/results", methods=["POST"])
 @_with_error_handling
 async def run_results(request: Request) -> Response:
     key = await auth.require_scope_from_request(request, Scope.WRITE)
@@ -256,7 +275,7 @@ async def run_results(request: Request) -> Response:
     return _ok(await service.submit_result(run_id, key.name, data), status=HTTPStatus.CREATED)
 
 
-@mcp.endpoint("/v1/runs/{run_id:int}/artifacts", methods=["POST"])
+@mcp.endpoint("/v1/runs/{run_id}/artifacts", methods=["POST"])
 @_with_error_handling
 async def run_artifacts(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)
@@ -265,7 +284,7 @@ async def run_artifacts(request: Request) -> Response:
     return _ok(await service.register_artifact(run_id, data), status=HTTPStatus.CREATED)
 
 
-@mcp.endpoint("/v1/runs/{run_id:int}/cancel", methods=["POST"])
+@mcp.endpoint("/v1/runs/{run_id}/cancel", methods=["POST"])
 @_with_error_handling
 async def run_cancel(request: Request) -> Response:
     """Dedicated action route (rather than PATCH .../{id} with status=cancelled)
@@ -274,21 +293,6 @@ async def run_cancel(request: Request) -> Response:
     status-setting PATCH."""
     await auth.require_scope_from_request(request, Scope.WRITE)
     return _ok(await service.cancel_run(request.path_params["run_id"]))
-
-
-@mcp.endpoint("/v1/runs/compare", methods=["GET"])
-@_with_error_handling
-async def runs_compare(request: Request) -> Response:
-    params = request.query_params
-    await auth.require_scope_from_request(request, Scope.READ)
-    metric = params.get("metric")
-    run_ids = [int(v) for v in params.getlist("ids")]
-    if not run_ids or not metric:
-        return JSONResponse(
-            {"error": "provide 'ids' (repeatable) and 'metric' query parameters"},
-            status_code=HTTPStatus.BAD_REQUEST.value,
-        )
-    return _ok(await service.compare_runs(run_ids, metric))
 
 
 @mcp.endpoint("/v1/artifacts", methods=["GET"])
@@ -314,7 +318,7 @@ async def artifacts_collection(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
-@mcp.endpoint("/v1/runs/{run_id:int}/artifacts/presign", methods=["POST"])
+@mcp.endpoint("/v1/runs/{run_id}/artifacts/presign", methods=["POST"])
 @_with_error_handling
 async def run_artifacts_presign(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)

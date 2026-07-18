@@ -123,40 +123,65 @@ CREATE TABLE IF NOT EXISTS api_key (
 -- Keep experiment.search current from title + hypothesis + latest writeup body.
 -- Not a generated column (Postgres GENERATED ALWAYS AS ... STORED can't run a
 -- subquery against writeup), so it's maintained by triggers instead.
-
-CREATE OR REPLACE FUNCTION experiment_search_refresh(p_experiment_id BIGINT) RETURNS void AS $$
-    UPDATE experiment e
-    SET search =
-        setweight(to_tsvector('english', coalesce(e.title, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(e.hypothesis, '')), 'B') ||
-        setweight(to_tsvector('english', coalesce((
-            SELECT w.body_md FROM writeup w
-            WHERE w.experiment_id = e.id
-            ORDER BY w.version DESC LIMIT 1
-        ), '')), 'C')
-    WHERE e.id = p_experiment_id;
-$$ LANGUAGE sql;
-
-CREATE OR REPLACE FUNCTION experiment_search_trigger() RETURNS trigger AS $$
+--
+-- Guarded on experiment.id still being BIGINT: 002_string_ids.sql moves
+-- experiment.id/run.id (and this function's parameter) to TEXT and takes
+-- over ownership of these same objects with a TEXT signature from then on,
+-- unconditionally re-asserting them on every `migrate` run. Since
+-- apply_migrations() re-executes every .sql file every time `migrate`
+-- runs, this file's own function body (`WHERE e.id = p_experiment_id`)
+-- would otherwise fail to even compile once e.id is TEXT — "operator does
+-- not exist: text = bigint" — before 002 gets a chance to fix it back.
+DO $guard$
 BEGIN
-    PERFORM experiment_search_refresh(NEW.id);
-    RETURN NEW;
+    IF (SELECT data_type FROM information_schema.columns
+        WHERE table_name = 'experiment' AND column_name = 'id') = 'bigint' THEN
+        EXECUTE $sql$
+            CREATE OR REPLACE FUNCTION experiment_search_refresh(p_experiment_id BIGINT) RETURNS void AS $body$
+                UPDATE experiment e
+                SET search =
+                    setweight(to_tsvector('english', coalesce(e.title, '')), 'A') ||
+                    setweight(to_tsvector('english', coalesce(e.hypothesis, '')), 'B') ||
+                    setweight(to_tsvector('english', coalesce((
+                        SELECT w.body_md FROM writeup w
+                        WHERE w.experiment_id = e.id
+                        ORDER BY w.version DESC LIMIT 1
+                    ), '')), 'C')
+                WHERE e.id = p_experiment_id;
+            $body$ LANGUAGE sql
+        $sql$;
+
+        EXECUTE $sql$
+            CREATE OR REPLACE FUNCTION experiment_search_trigger() RETURNS trigger AS $body$
+            BEGIN
+                PERFORM experiment_search_refresh(NEW.id);
+                RETURN NEW;
+            END;
+            $body$ LANGUAGE plpgsql
+        $sql$;
+
+        EXECUTE 'DROP TRIGGER IF EXISTS trg_experiment_search ON experiment';
+        EXECUTE $sql$
+            CREATE TRIGGER trg_experiment_search
+                AFTER INSERT OR UPDATE OF title, hypothesis ON experiment
+                FOR EACH ROW EXECUTE FUNCTION experiment_search_trigger()
+        $sql$;
+
+        EXECUTE $sql$
+            CREATE OR REPLACE FUNCTION writeup_search_trigger() RETURNS trigger AS $body$
+            BEGIN
+                PERFORM experiment_search_refresh(NEW.experiment_id);
+                RETURN NEW;
+            END;
+            $body$ LANGUAGE plpgsql
+        $sql$;
+
+        EXECUTE 'DROP TRIGGER IF EXISTS trg_writeup_search ON writeup';
+        EXECUTE $sql$
+            CREATE TRIGGER trg_writeup_search
+                AFTER INSERT ON writeup
+                FOR EACH ROW EXECUTE FUNCTION writeup_search_trigger()
+        $sql$;
+    END IF;
 END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_experiment_search ON experiment;
-CREATE TRIGGER trg_experiment_search
-    AFTER INSERT OR UPDATE OF title, hypothesis ON experiment
-    FOR EACH ROW EXECUTE FUNCTION experiment_search_trigger();
-
-CREATE OR REPLACE FUNCTION writeup_search_trigger() RETURNS trigger AS $$
-BEGIN
-    PERFORM experiment_search_refresh(NEW.experiment_id);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_writeup_search ON writeup;
-CREATE TRIGGER trg_writeup_search
-    AFTER INSERT ON writeup
-    FOR EACH ROW EXECUTE FUNCTION writeup_search_trigger();
+$guard$;

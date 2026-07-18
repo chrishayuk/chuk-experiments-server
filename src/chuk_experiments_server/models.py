@@ -67,7 +67,7 @@ class WriteupCreate(BaseModel):
 
 
 class RunSummary(RecordModel):
-    id: int
+    id: str
     slug: str
     status: RunStatus
     backend: str | None = None
@@ -78,7 +78,7 @@ class RunSummary(RecordModel):
 
 
 class ExperimentSummary(RecordModel):
-    id: int
+    id: str
     slug: str
     title: str
     status: ExperimentStatus
@@ -90,7 +90,7 @@ class ExperimentSummary(RecordModel):
 
 
 class Experiment(RecordModel):
-    id: int
+    id: str
     slug: str
     title: str
     status: ExperimentStatus
@@ -107,7 +107,9 @@ class Experiment(RecordModel):
 
 class ExperimentCreate(BaseModel):
     programme: str
-    slug: str
+    # Auto-generated (EXP-YYYYMMDD-HHMMSS-<rand>) via service._generate_ref
+    # when omitted — human-chosen slugs still win when supplied.
+    slug: str | None = None
     title: str
     hypothesis: str | None = None
     design: dict[str, Any] = Field(default_factory=dict)
@@ -141,7 +143,7 @@ class SearchHit(RecordModel):
 
 class Result(RecordModel):
     id: int
-    run_id: int
+    run_id: str
     name: str
     value: float | None = None
     value_json: dict[str, Any] | None = None
@@ -161,7 +163,7 @@ class ResultCreate(BaseModel):
 
 class Artifact(RecordModel):
     id: int
-    run_id: int
+    run_id: str
     kind: ArtifactKind
     uri: str
     bytes: int | None = None
@@ -191,11 +193,11 @@ class ArtifactPresignResponse(BaseModel):
 
 
 class Run(RecordModel):
-    id: int
+    id: str
     slug: str
     status: RunStatus
     priority: int = 0
-    depends_on: list[int] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
     workspec: dict[str, Any] = Field(default_factory=dict)
     requirements: dict[str, Any] = Field(default_factory=dict)
     est_seconds: int | None = None
@@ -223,13 +225,15 @@ class RunCreate(BaseModel):
     harness worker needs to execute the run with no other context."""
 
     experiment: str
-    slug: str
+    # Auto-generated (RUN-YYYYMMDD-HHMMSS-<rand>) via service._generate_ref
+    # when omitted — an explicit slug still wins when supplied.
+    slug: str | None = None
     backend: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     budget_seconds: int | None = None
     status: RunStatus = RunStatus.QUEUED
     priority: int = 0
-    depends_on: list[int] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
     workspec: dict[str, Any] = Field(default_factory=dict)
     requirements: dict[str, Any] = Field(default_factory=dict)
     est_seconds: int | None = None
@@ -245,7 +249,7 @@ class RunUpdate(BaseModel):
 
 
 class RunComparisonRow(RecordModel):
-    run_id: int
+    run_id: str
     run_slug: str
     experiment_slug: str
     value: float | None = None

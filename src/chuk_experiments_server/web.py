@@ -211,7 +211,7 @@ async def experiment_detail(request: Request) -> Response:
     )
 
 
-@mcp.endpoint("/runs/{run_id:int}", methods=["GET"])
+@mcp.endpoint("/runs/{run_id}", methods=["GET"])
 @_dashboard_route
 async def run_detail(request: Request) -> Response:
     run = await _api_get(f"/v1/runs/{request.path_params['run_id']}")

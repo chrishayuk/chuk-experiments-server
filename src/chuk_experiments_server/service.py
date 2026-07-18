@@ -7,6 +7,7 @@ to Postgres. Every public function takes/returns the Pydantic models from
 validate once, at the edge, in the same shape.
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -17,8 +18,13 @@ from .constants import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_MAX_CLAIM_ATTEMPTS,
     DEFAULT_SEARCH_LIMIT,
+    EXPERIMENT_ID_PREFIX,
+    EXPERIMENT_REF_SEQUENCE,
+    ID_SEQUENCE_PAD_WIDTH,
     LEASABLE_RUN_STATUSES,
     METRIC_OP_SQL,
+    RUN_ID_PREFIX,
+    RUN_REF_SEQUENCE,
     MetricOp,
     RunStatus,
 )
@@ -98,6 +104,17 @@ def _humanize_slug(slug: str) -> str:
     give it a readable default name ("state-construction" -> "State
     Construction") rather than echoing the slug verbatim."""
     return slug.replace("-", " ").title()
+
+
+async def _generate_ref(prefix: str, sequence_name: str) -> str:
+    """Sortable id/slug: {PREFIX}-{YYYYMMDD}-{HHMMSS}-{zero-padded sequence
+    number}, e.g. "RUN-20260718-160217-00397" — matches the format already
+    used by the gpu-training-harness train server. Used as experiment.id/
+    run.id always, and as their slug when the caller doesn't supply one."""
+    pool = await get_pool()
+    seq = await pool.fetchval(f"SELECT nextval('{sequence_name}')")
+    now = datetime.now(timezone.utc)
+    return f"{prefix}-{now:%Y%m%d}-{now:%H%M%S}-{seq:0{ID_SEQUENCE_PAD_WIDTH}d}"
 
 
 # ---------------------------------------------------------------------------
@@ -189,16 +206,19 @@ async def get_experiment(slug: str) -> Experiment:
 
 async def create_experiment(data: ExperimentCreate) -> Experiment:
     prog = await get_or_create_programme(ProgrammeCreate(slug=data.programme, name=data.programme_name))
+    experiment_id = await _generate_ref(EXPERIMENT_ID_PREFIX, EXPERIMENT_REF_SEQUENCE)
+    slug = data.slug or await _generate_ref(EXPERIMENT_ID_PREFIX, EXPERIMENT_REF_SEQUENCE)
     pool = await get_pool()
     try:
         row = await pool.fetchrow(
             """
-            INSERT INTO experiment (programme_id, slug, title, status, hypothesis, design, tags)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO experiment (id, programme_id, slug, title, status, hypothesis, design, tags)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, slug, title, status, hypothesis, design, tags, created_at, updated_at
             """,
+            experiment_id,
             prog.id,
-            data.slug,
+            slug,
             data.title,
             data.status.value,
             data.hypothesis,
@@ -206,9 +226,7 @@ async def create_experiment(data: ExperimentCreate) -> Experiment:
             data.tags,
         )
     except asyncpg.UniqueViolationError:
-        raise ConflictError(
-            f"Experiment '{data.slug}' already exists in programme '{data.programme}'"
-        ) from None
+        raise ConflictError(f"Experiment '{slug}' already exists in programme '{data.programme}'") from None
     return await get_experiment(row["slug"])
 
 
@@ -374,18 +392,21 @@ async def enqueue_run(data: RunCreate) -> Run:
     exp_id = await pool.fetchval("SELECT id FROM experiment WHERE slug = $1", data.experiment)
     if exp_id is None:
         raise NotFoundError(f"No experiment with slug '{data.experiment}'")
+    run_id = await _generate_ref(RUN_ID_PREFIX, RUN_REF_SEQUENCE)
+    slug = data.slug or await _generate_ref(RUN_ID_PREFIX, RUN_REF_SEQUENCE)
     try:
         row = await pool.fetchrow(
             """
             INSERT INTO run (
-                experiment_id, slug, status, backend, config, budget_seconds,
+                id, experiment_id, slug, status, backend, config, budget_seconds,
                 priority, depends_on, workspec, requirements, est_seconds
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING id
             """,
+            run_id,
             exp_id,
-            data.slug,
+            slug,
             data.status.value,
             data.backend,
             data.config,
@@ -397,7 +418,7 @@ async def enqueue_run(data: RunCreate) -> Run:
             data.est_seconds,
         )
     except asyncpg.UniqueViolationError:
-        raise ConflictError(f"Run '{data.slug}' already exists on experiment '{data.experiment}'") from None
+        raise ConflictError(f"Run '{slug}' already exists on experiment '{data.experiment}'") from None
     return await get_run(row["id"])
 
 
@@ -410,7 +431,7 @@ _RUN_COLUMNS = """
 """
 
 
-async def get_run(run_id: int) -> Run:
+async def get_run(run_id: str) -> Run:
     pool = await get_pool()
     run = await pool.fetchrow(
         f"""
@@ -443,7 +464,7 @@ async def get_run(run_id: int) -> Run:
     return Run.model_validate(data)
 
 
-async def update_run(run_id: int, data: RunUpdate) -> Run:
+async def update_run(run_id: str, data: RunUpdate) -> Run:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -470,7 +491,7 @@ async def update_run(run_id: int, data: RunUpdate) -> Run:
     return await get_run(run_id)
 
 
-async def compare_runs(run_ids: list[int], metric: str) -> list[RunComparisonRow]:
+async def compare_runs(run_ids: list[str], metric: str) -> list[RunComparisonRow]:
     pool = await get_pool()
     rows = await pool.fetch(
         """
@@ -479,7 +500,7 @@ async def compare_runs(run_ids: list[int], metric: str) -> list[RunComparisonRow
         FROM run r
         JOIN experiment e ON e.id = r.experiment_id
         LEFT JOIN result res ON res.run_id = r.id AND res.name = $2
-        WHERE r.id = ANY($1::bigint[])
+        WHERE r.id = ANY($1::text[])
         ORDER BY r.id
         """,
         run_ids,
@@ -488,7 +509,7 @@ async def compare_runs(run_ids: list[int], metric: str) -> list[RunComparisonRow
     return [RunComparisonRow.model_validate(dict(row)) for row in rows]
 
 
-async def cancel_run(run_id: int) -> Run:
+async def cancel_run(run_id: str) -> Run:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -577,7 +598,7 @@ async def claim_queue(
             backend,
         )
 
-        claimed_ids: list[int] = []
+        claimed_ids: list[str] = []
         remaining = session_seconds
         for row in candidates:
             cost = row["est_seconds"] or 0
@@ -598,7 +619,7 @@ async def claim_queue(
                     claimed_by = $2,
                     claimed_at = now(),
                     lease_expires_at = now() + make_interval(secs => $3)
-                WHERE id = ANY($1::bigint[])
+                WHERE id = ANY($1::text[])
                 """,
                 claimed_ids,
                 claimed_by,
@@ -608,7 +629,7 @@ async def claim_queue(
     return [await get_run(run_id) for run_id in claimed_ids]
 
 
-async def renew_lease(run_id: int, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Run:
+async def renew_lease(run_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Run:
     """The heartbeat call — also transitions claimed -> running on first
     renewal, since a lease renewal is the harness telling us the run is
     alive."""
@@ -667,7 +688,7 @@ async def sweep_expired_leases(max_attempts: int = DEFAULT_MAX_CLAIM_ATTEMPTS) -
 # ---------------------------------------------------------------------------
 
 
-async def submit_result(run_id: int, submitted_by: str, data: ResultCreate) -> Result:
+async def submit_result(run_id: str, submitted_by: str, data: ResultCreate) -> Result:
     """`submitted_by` is the calling API key's identity, not client-supplied —
     the spec's provenance guarantee ("submitted_by gives provenance on every
     result") only holds if the caller can't just put whatever name they like
@@ -698,7 +719,7 @@ async def submit_result(run_id: int, submitted_by: str, data: ResultCreate) -> R
 # ---------------------------------------------------------------------------
 
 
-async def register_artifact(run_id: int, data: ArtifactCreate) -> Artifact:
+async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
     pool = await get_pool()
     run_exists = await pool.fetchval("SELECT 1 FROM run WHERE id = $1", run_id)
     if not run_exists:

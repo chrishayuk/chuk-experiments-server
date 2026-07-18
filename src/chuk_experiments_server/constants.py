@@ -92,6 +92,18 @@ DEFAULT_MAX_CLAIM_ATTEMPTS = 3
 DB_POOL_MIN_SIZE = 1
 DB_POOL_MAX_SIZE = 10
 
+# --- Sortable ids (experiment.id, run.id, and their auto-generated slugs) ----
+# Format: {PREFIX}-{YYYYMMDD}-{HHMMSS}-{5-digit zero-padded sequence number},
+# e.g. "RUN-20260718-160217-00397" — matches the convention already used by
+# the gpu-training-harness train server. Sorts chronologically as a plain
+# string, unlike a UUID or an opaque serial int.
+
+EXPERIMENT_ID_PREFIX = "EXP"
+RUN_ID_PREFIX = "RUN"
+ID_SEQUENCE_PAD_WIDTH = 5
+EXPERIMENT_REF_SEQUENCE = "experiment_ref_seq"
+RUN_REF_SEQUENCE = "run_ref_seq"
+
 # --- Auth ------------------------------------------------------------------
 
 BEARER_PREFIX = "bearer"

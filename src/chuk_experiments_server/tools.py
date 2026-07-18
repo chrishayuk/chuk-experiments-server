@@ -13,7 +13,6 @@ REST endpoint produced (its own error shape included), so a failed lookup
 reads as data to the calling agent rather than an opaque tool-call failure.
 """
 
-import uuid
 from typing import Any
 
 import httpx
@@ -134,17 +133,17 @@ async def search_experiments(
 
 
 @mcp.tool
-async def get_run(run_id: int) -> Any:
+async def get_run(run_id: str) -> Any:
     """Fetch one run's detail: config, W&B URL, results, and registered artifacts.
 
     Args:
-        run_id: Numeric run id
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
     """
     return await _api_request("GET", f"/v1/runs/{run_id}")
 
 
 @mcp.tool
-async def compare_runs(run_ids: list[int], metric: str) -> Any:
+async def compare_runs(run_ids: list[str], metric: str) -> Any:
     """Tabular comparison of a single named metric across several runs.
 
     Args:
@@ -189,8 +188,8 @@ async def peek_queue(backend: str | None = None) -> Any:
 @mcp.tool
 async def create_experiment(
     programme: str,
-    slug: str,
     title: str,
+    slug: str | None = None,
     hypothesis: str | None = None,
     design: dict[str, Any] | None = None,
 ) -> Any:
@@ -198,8 +197,9 @@ async def create_experiment(
 
     Args:
         programme: Programme slug this experiment belongs to
-        slug: Unique experiment slug (e.g. "cn-11")
         title: Short human-readable title
+        slug: Unique experiment slug (e.g. "cn-11") — auto-generated
+            (e.g. "EXP-20260718-160217-00397") when omitted
         hypothesis: What we expect and why
         design: Model/dataset/params/arms as a JSON object
     """
@@ -226,7 +226,7 @@ async def append_writeup(slug: str, body_md: str) -> Any:
 
 @mcp.tool
 async def submit_result(
-    run_id: int,
+    run_id: str,
     name: str,
     value: float | None = None,
     verdict: str | None = None,
@@ -235,7 +235,7 @@ async def submit_result(
     """Submit a named metric/verdict for a run (submitted_by is the calling API key's identity).
 
     Args:
-        run_id: Numeric run id
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         name: Metric name (e.g. "val_loss_final")
         value: Scalar metric value
         verdict: pass/fail/inconclusive/n/a
@@ -247,7 +247,7 @@ async def submit_result(
 
 @mcp.tool
 async def register_artifact(
-    run_id: int,
+    run_id: str,
     kind: str,
     uri: str,
     sha256: str | None = None,
@@ -256,7 +256,7 @@ async def register_artifact(
     """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for a run.
 
     Args:
-        run_id: Numeric run id
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
         uri: Storage URI (s3://... or file://...)
         sha256: Content hash, if known
@@ -267,11 +267,11 @@ async def register_artifact(
 
 
 @mcp.tool
-async def set_run_status(run_id: int, status: str) -> Any:
+async def set_run_status(run_id: str, status: str) -> Any:
     """Update a run's lifecycle status.
 
     Args:
-        run_id: Numeric run id
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         status: queued/claimed/running/completed/failed/killed/lost/cancelled
     """
     return await _api_request("PATCH", f"/v1/runs/{run_id}", json={"status": status})
@@ -283,7 +283,7 @@ async def enqueue_run(
     workspec: dict[str, Any],
     requirements: dict[str, Any] | None = None,
     priority: int = 0,
-    depends_on: list[int] | None = None,
+    depends_on: list[str] | None = None,
     est_seconds: int | None = None,
 ) -> Any:
     """Enqueue a run with a self-contained workspec for a harness worker to execute.
@@ -299,7 +299,6 @@ async def enqueue_run(
         est_seconds: Estimated wall-clock cost, used for session packing at claim time
     """
     body = {
-        "slug": f"run-{uuid.uuid4().hex[:12]}",
         "workspec": workspec,
         "requirements": requirements or {},
         "priority": priority,
@@ -310,10 +309,10 @@ async def enqueue_run(
 
 
 @mcp.tool
-async def cancel_run(run_id: int) -> Any:
+async def cancel_run(run_id: str) -> Any:
     """Cancel a queued or claimed run (no-op error if it's already running/finished).
 
     Args:
-        run_id: Numeric run id
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
     """
     return await _api_request("POST", f"/v1/runs/{run_id}/cancel")

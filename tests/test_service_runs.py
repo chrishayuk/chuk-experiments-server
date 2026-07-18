@@ -42,7 +42,7 @@ async def test_get_run_includes_results_and_artifacts():
 
 async def test_get_run_missing_raises_not_found():
     with pytest.raises(service.NotFoundError):
-        await service.get_run(999999)
+        await service.get_run("RUN-00000000-000000-absent")
 
 
 async def test_update_run_status_and_cost():
@@ -69,12 +69,16 @@ async def test_compare_runs_across_two_experiments():
 
 async def test_submit_result_missing_run_raises_not_found():
     with pytest.raises(service.NotFoundError):
-        await service.submit_result(999999, "chris", ResultCreate(name="acc", value=1.0))
+        await service.submit_result(
+            "RUN-00000000-000000-absent", "chris", ResultCreate(name="acc", value=1.0)
+        )
 
 
 async def test_register_artifact_missing_run_raises_not_found():
     with pytest.raises(service.NotFoundError):
-        await service.register_artifact(999999, ArtifactCreate(kind="checkpoint", uri="s3://x"))
+        await service.register_artifact(
+            "RUN-00000000-000000-absent", ArtifactCreate(kind="checkpoint", uri="s3://x")
+        )
 
 
 async def test_get_artifact_returns_registered_artifact():
