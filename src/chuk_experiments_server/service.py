@@ -8,10 +8,12 @@ validate once, at the edge, in the same shape.
 """
 
 from datetime import datetime, timezone
+from http import HTTPStatus
 from typing import Any
 
 import asyncpg
 
+from .auth import AuthError, generate_key, hash_key
 from .constants import (
     CANCELLABLE_RUN_STATUSES,
     DEFAULT_LEASE_SECONDS,
@@ -23,16 +25,22 @@ from .constants import (
     ID_SEQUENCE_PAD_WIDTH,
     LEASABLE_RUN_STATUSES,
     METRIC_OP_SQL,
+    ROLE_SCOPE_CEILING,
     RUN_ID_PREFIX,
     RUN_REF_SEQUENCE,
     MetricOp,
     RunStatus,
+    Scope,
 )
 from .db import get_pool
 from .markdown_render import render as render_writeup_html
 from .models import (
+    AppUser,
+    ApiKeyCreateResponse,
+    ApiKeySummary,
     Artifact,
     ArtifactCreate,
+    DashboardIdentity,
     Experiment,
     ExperimentCreate,
     ExperimentSummary,
@@ -797,3 +805,138 @@ async def find_checkpoints(
         *params,
     )
     return [Artifact.model_validate(dict(row)) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Users & self-service API keys (dashboard team management)
+# ---------------------------------------------------------------------------
+# Single seeded 'default' team for now (Chris's call — "saves us refactoring
+# later" rather than building multi-team support before it's needed): every
+# query below implicitly operates within it. Adding real team-switching later
+# means adding a team_id filter here, not a schema change.
+
+
+async def get_active_user_by_email(email: str) -> AppUser | None:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, email, role, created_at, revoked_at FROM app_user WHERE email = $1 AND revoked_at IS NULL",
+        email,
+    )
+    return AppUser.model_validate(dict(row)) if row else None
+
+
+async def list_team_users() -> list[AppUser]:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, email, role, created_at, revoked_at FROM app_user ORDER BY created_at"
+    )
+    return [AppUser.model_validate(dict(row)) for row in rows]
+
+
+async def create_user(email: str, role: Scope) -> AppUser:
+    pool = await get_pool()
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO app_user (team_id, email, role)
+            VALUES ((SELECT id FROM team WHERE slug = 'default'), $1, $2)
+            RETURNING id, email, role, created_at, revoked_at
+            """,
+            email,
+            role.value,
+        )
+    except asyncpg.UniqueViolationError:
+        raise ConflictError(f"A user with email '{email}' already exists") from None
+    return AppUser.model_validate(dict(row))
+
+
+async def revoke_user(user_id: int) -> None:
+    """Soft-revokes the user and cascades to their own API keys — a removed
+    collaborator shouldn't leave live credentials behind."""
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE app_user SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id",
+            user_id,
+        )
+        if row is None:
+            raise NotFoundError(f"No active user with id {user_id}")
+        await conn.execute(
+            "UPDATE api_key SET revoked_at = now() WHERE created_by_user_id = $1 AND revoked_at IS NULL",
+            user_id,
+        )
+
+
+async def list_api_keys(caller: DashboardIdentity) -> list[ApiKeySummary]:
+    """Admins (including the bearer-ADMIN "system operator", user_id=None)
+    see every key on the team; anyone else sees only their own."""
+    pool = await get_pool()
+    if caller.role == Scope.ADMIN:
+        rows = await pool.fetch(
+            """
+            SELECT k.id, k.name, k.scopes, k.created_at, k.revoked_at, u.email AS created_by_email
+            FROM api_key k
+            LEFT JOIN app_user u ON u.id = k.created_by_user_id
+            ORDER BY k.created_at DESC
+            """
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT k.id, k.name, k.scopes, k.created_at, k.revoked_at, u.email AS created_by_email
+            FROM api_key k
+            LEFT JOIN app_user u ON u.id = k.created_by_user_id
+            WHERE k.created_by_user_id = $1
+            ORDER BY k.created_at DESC
+            """,
+            caller.user_id,
+        )
+    return [ApiKeySummary.model_validate(dict(row)) for row in rows]
+
+
+async def create_api_key(caller: DashboardIdentity, name: str, scopes: list[Scope]) -> ApiKeyCreateResponse:
+    """Self-service key minting — `scopes` is capped at the caller's own role
+    ceiling (see ROLE_SCOPE_CEILING), so a "write"-role user can never mint
+    themselves an admin-scoped key. Returns the raw key once, same
+    "shown only now" contract as the CLI's `keys create`."""
+    excess = set(scopes) - ROLE_SCOPE_CEILING[caller.role]
+    if excess:
+        raise AuthError(
+            f"role '{caller.role.value}' cannot mint scope(s): {', '.join(sorted(s.value for s in excess))}",
+            status_code=HTTPStatus.FORBIDDEN,
+        )
+    raw = generate_key()
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO api_key (key_hash, name, scopes, team_id, created_by_user_id)
+        VALUES ($1, $2, $3, (SELECT id FROM team WHERE slug = 'default'), $4)
+        RETURNING id, name, scopes, created_at
+        """,
+        hash_key(raw),
+        name,
+        [s.value for s in scopes],
+        caller.user_id,
+    )
+    return ApiKeyCreateResponse.model_validate({**dict(row), "raw_key": raw})
+
+
+async def revoke_api_key(caller: DashboardIdentity, key_id: int) -> None:
+    pool = await get_pool()
+    if caller.role == Scope.ADMIN:
+        row = await pool.fetchrow(
+            "UPDATE api_key SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING id",
+            key_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            UPDATE api_key SET revoked_at = now()
+            WHERE id = $1 AND created_by_user_id = $2 AND revoked_at IS NULL
+            RETURNING id
+            """,
+            key_id,
+            caller.user_id,
+        )
+    if row is None:
+        raise NotFoundError(f"No api key with id {key_id}")

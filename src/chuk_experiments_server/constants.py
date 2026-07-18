@@ -127,6 +127,21 @@ RUN_REF_SEQUENCE = "run_ref_seq"
 BEARER_PREFIX = "bearer"
 AUTHORIZATION_HEADER = "authorization"
 
+#: A dashboard user's `role` reuses the Scope vocabulary (read/write/admin —
+#: the values already line up exactly) rather than a parallel enum. Ceiling
+#: on what scopes a self-service-minted API key may carry, keyed by the
+#: creating user's role — e.g. a "write"-role user can mint read+write keys
+#: for their own tools, but never an admin-scoped one.
+ROLE_SCOPE_CEILING: dict[Scope, frozenset[Scope]] = {
+    Scope.READ: frozenset({Scope.READ}),
+    Scope.WRITE: frozenset({Scope.READ, Scope.WRITE}),
+    Scope.ADMIN: frozenset({Scope.READ, Scope.WRITE, Scope.ADMIN}),
+}
+
+#: Ordinal ranking so `require_dashboard_role` can check "is this user's role
+#: at least as privileged as the route requires" with a plain comparison.
+ROLE_ORDER: dict[Scope, int] = {Scope.READ: 0, Scope.WRITE: 1, Scope.ADMIN: 2}
+
 # --- Server ------------------------------------------------------------------
 
 DEFAULT_HTTP_HOST = "0.0.0.0"  # noqa: S104 - intentional bind-all for containers

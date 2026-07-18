@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.templating import Jinja2Templates
 
-from . import webauth
+from . import service, webauth
 from .config import settings
 from .constants import (
     OAUTH_STATE_COOKIE_MAX_AGE_SECONDS,
@@ -27,6 +27,16 @@ from .server import mcp
 _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
 
+async def _active_dashboard_email(request: Request) -> str | None:
+    """Cookie-authenticated AND still an active (non-revoked) app_user — a
+    revoked collaborator's still-unexpired session cookie shouldn't keep
+    working just because it hasn't expired yet."""
+    email = webauth.get_authenticated_email(request)
+    if not email:
+        return None
+    return email if await service.get_active_user_by_email(email) is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -34,7 +44,7 @@ _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "te
 
 @mcp.endpoint("/login", methods=["GET"])
 async def login_page(request: Request) -> Response:
-    if webauth.is_authenticated(request):
+    if await _active_dashboard_email(request) is not None:
         return RedirectResponse("/", status_code=HTTPStatus.FOUND.value)
     if not settings.dashboard_auth_configured:
         return HTMLResponse(
@@ -70,7 +80,7 @@ async def auth_callback(request: Request) -> Response:
     except webauth.GoogleAuthError:
         return RedirectResponse("/login?error=sign-in+failed", status_code=HTTPStatus.FOUND.value)
 
-    if email != settings.dashboard_allowed_email:
+    if await service.get_active_user_by_email(email) is None:
         return RedirectResponse("/login?error=not+authorized", status_code=HTTPStatus.FOUND.value)
 
     response = RedirectResponse("/", status_code=HTTPStatus.FOUND.value)
@@ -103,8 +113,7 @@ async def app_shell(request: Request) -> Response:
     JS hash-routing + fetch() against /v1/*. Google sign-in only gates this
     once actually configured (Fly secrets in production); local dev, with
     no Google credentials set, gets straight in."""
-    if settings.dashboard_auth_configured and not webauth.is_authenticated(request):
+    email = await _active_dashboard_email(request)
+    if settings.dashboard_auth_configured and email is None:
         return RedirectResponse("/login", status_code=HTTPStatus.FOUND.value)
-    return _templates.TemplateResponse(
-        request, "app.html", {"user_email": webauth.get_authenticated_email(request)}
-    )
+    return _templates.TemplateResponse(request, "app.html", {"user_email": email})

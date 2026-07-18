@@ -139,6 +139,26 @@ async def test_migrate_without_bootstrap_key_is_a_noop(_apply_schema, monkeypatc
     await close_pool()
 
 
+async def test_migrate_upserts_bootstrap_admin_user(_apply_schema, monkeypatch):
+    from chuk_experiments_server import service
+    from chuk_experiments_server.constants import Scope
+
+    monkeypatch.setenv("DASHBOARD_ALLOWED_EMAIL", "cli-admin@example.com")
+    await cli._migrate()
+    try:
+        user = await service.get_active_user_by_email("cli-admin@example.com")
+        assert user is not None
+        assert user.role == Scope.ADMIN
+    finally:
+        await close_pool()
+
+
+async def test_migrate_without_dashboard_allowed_email_skips_user_bootstrap(_apply_schema, monkeypatch):
+    monkeypatch.delenv("DASHBOARD_ALLOWED_EMAIL", raising=False)
+    await cli._migrate()  # must not raise
+    await close_pool()
+
+
 async def test_create_key_prints_raw_key_once(_apply_schema, capsys):
     await cli._create_key("harness-colab", ["read", "write"])
     try:

@@ -1,7 +1,10 @@
 """webauth.py tests — sign/verify and the OAuth code-exchange logic are pure
-enough to unit-test directly; get_authenticated_email/is_authenticated take
-a duck-typed fake request (just needs a `.cookies` dict) rather than a full
-ASGI Request, since that's all they read."""
+enough to unit-test directly; get_authenticated_email takes a duck-typed
+fake request (just needs a `.cookies` dict) rather than a full ASGI Request,
+since that's all it reads. Whether a signed-in email is still an active
+app_user (revoked-status, role) is checked by callers with DB access
+(auth.require_scope_from_request/require_dashboard_role, web.py) — see
+test_auth.py/test_rest.py/test_web.py for that half."""
 
 import time
 
@@ -85,18 +88,6 @@ def test_get_authenticated_email_missing_session_secret_returns_none(monkeypatch
     monkeypatch.delenv("SESSION_SECRET", raising=False)
     request = _FakeRequest({SESSION_COOKIE_NAME: token})
     assert webauth.get_authenticated_email(request) is None
-
-
-def test_is_authenticated_matches_allowed_email():
-    token = webauth.create_session_cookie_value(settings.dashboard_allowed_email)
-    request = _FakeRequest({SESSION_COOKIE_NAME: token})
-    assert webauth.is_authenticated(request)
-
-
-def test_is_authenticated_rejects_other_email():
-    token = webauth.create_session_cookie_value("someone-else@example.com")
-    request = _FakeRequest({SESSION_COOKIE_NAME: token})
-    assert not webauth.is_authenticated(request)
 
 
 def test_new_oauth_state_is_unique():

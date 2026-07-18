@@ -334,3 +334,60 @@ class ApiKey(RecordModel):
 
     def has_scope(self, scope: Scope) -> bool:
         return scope in self.scopes or Scope.ADMIN in self.scopes
+
+
+# ---------------------------------------------------------------------------
+# Users & self-service API keys (dashboard, spec §8 teams/roles)
+# ---------------------------------------------------------------------------
+
+
+class AppUser(RecordModel):
+    id: int
+    email: str
+    role: Scope
+    created_at: datetime
+    revoked_at: datetime | None = None
+
+
+class AppUserCreate(BaseModel):
+    email: str
+    role: Scope
+
+
+class ApiKeySummary(RecordModel):
+    """A key's metadata for the management screen — never the raw value or
+    key_hash. `created_by_email` is None for CLI/bootstrap-created keys with
+    no human user behind them."""
+
+    id: int
+    name: str
+    scopes: list[Scope]
+    created_at: datetime
+    revoked_at: datetime | None = None
+    created_by_email: str | None = None
+
+
+class ApiKeyCreate(BaseModel):
+    name: str
+    scopes: list[Scope]
+
+
+class ApiKeyCreateResponse(RecordModel):
+    """Same "shown once" contract as the CLI's `keys create` — raw_key is
+    never persisted or returned again after this response."""
+
+    id: int
+    name: str
+    scopes: list[Scope]
+    created_at: datetime
+    raw_key: str
+
+
+class DashboardIdentity(BaseModel):
+    """Who's making a user/key-management request — either a real signed-in
+    AppUser, or None standing in for a bearer-ADMIN "system operator" (no
+    specific user, matching CLI-created keys' created_by_user_id=NULL)."""
+
+    email: str | None
+    role: Scope
+    user_id: int | None = None

@@ -15,7 +15,7 @@ import sys
 from . import auth, service
 from ._version import __version__
 from .config import settings
-from .constants import DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, DEFAULT_MAX_CLAIM_ATTEMPTS
+from .constants import DEFAULT_HTTP_HOST, DEFAULT_HTTP_PORT, DEFAULT_MAX_CLAIM_ATTEMPTS, Scope
 from .db import apply_migrations, close_pool
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,9 @@ async def _migrate() -> None:
     if settings.bootstrap_key:
         await auth.upsert_bootstrap_key(settings.bootstrap_key)
         logger.info("Bootstrap API key upserted")
+    if settings.dashboard_allowed_email:
+        await auth.upsert_bootstrap_user(settings.dashboard_allowed_email, Scope.ADMIN)
+        logger.info("Bootstrap admin user upserted")
     await close_pool()
 
 

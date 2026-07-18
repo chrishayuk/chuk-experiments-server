@@ -1,11 +1,14 @@
-"""Google sign-in for the dashboard, restricted to one email address.
+"""Google sign-in for the dashboard.
 
 Not the same thing as auth.py's bearer-token API auth (that's for REST/MCP
 clients, which can set an Authorization header) — this is a browser session:
 a human visits a page, signs in with Google, and gets an HttpOnly cookie
-good for a week. Stateless — no session table — the cookie is an
-HMAC-signed "email:expiry" payload, verified on every request rather than
-looked up.
+good for a week. This module itself is stateless — no session table, no DB
+access — the cookie is an HMAC-signed "email:expiry" payload, verified on
+every request rather than looked up. It only proves *which* Google account
+signed in; whether that email is still an active app_user (and what role
+they have) is checked separately by callers (see auth.require_dashboard_role
+and web.py's _active_dashboard_email), since that check needs the DB.
 """
 
 import hashlib
@@ -67,11 +70,6 @@ def get_authenticated_email(request: Request) -> str | None:
         # have been minted without it, so a cookie showing up here is
         # stale/foreign, not a crash-worthy condition.
         return None
-
-
-def is_authenticated(request: Request) -> bool:
-    email = get_authenticated_email(request)
-    return email is not None and email == settings.dashboard_allowed_email
 
 
 def new_oauth_state() -> str:

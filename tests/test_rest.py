@@ -403,3 +403,118 @@ async def test_run_lease_renewal(api_client, write_key):
     resp = await api_client.post(f"/v1/runs/{run_id}/lease", headers=_auth(write_key))
     assert resp.status_code == HTTPStatus.OK
     assert resp.json()["status"] == "running"
+
+
+# --- Dashboard users & self-service API keys ----------------------------------
+
+
+async def _cookie_for(email: str, role: str) -> dict:
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+    from chuk_experiments_server.constants import Scope as _Scope
+
+    await auth_module.upsert_bootstrap_user(email, _Scope(role))
+    return {SESSION_COOKIE_NAME: webauth.create_session_cookie_value(email)}
+
+
+async def test_me_bearer_admin(api_client, write_key):
+    resp = await api_client.get("/v1/me", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"email": None, "role": "admin"}
+
+
+async def test_me_cookie_reflects_signed_in_users_role(api_client):
+    cookies = await _cookie_for("me-reader@example.com", "read")
+    resp = await api_client.get("/v1/me", cookies=cookies)
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"email": "me-reader@example.com", "role": "read"}
+
+
+async def test_users_collection_requires_admin_role(api_client):
+    cookies = await _cookie_for("plain-reader@example.com", "read")
+    resp = await api_client.get("/v1/users", cookies=cookies)
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+
+
+async def test_users_collection_admin_can_create_and_list(api_client, write_key):
+    resp = await api_client.post(
+        "/v1/users", json={"email": "newbie@example.com", "role": "write"}, headers=_auth(write_key)
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    assert resp.json()["role"] == "write"
+
+    list_resp = await api_client.get("/v1/users", headers=_auth(write_key))
+    assert "newbie@example.com" in {u["email"] for u in list_resp.json()}
+
+
+async def test_users_item_revoke_requires_admin_role(api_client):
+    cookies = await _cookie_for("cant-revoke@example.com", "write")
+    resp = await api_client.delete("/v1/users/999999", cookies=cookies)
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+
+
+async def test_users_item_revoke_cascades_their_keys(api_client, write_key):
+    create_resp = await api_client.post(
+        "/v1/users", json={"email": "temp@example.com", "role": "write"}, headers=_auth(write_key)
+    )
+    user_id = create_resp.json()["id"]
+    cookies = await _cookie_for("temp@example.com", "write")
+    key_resp = await api_client.post(
+        "/v1/keys", json={"name": "temp-key", "scopes": ["read"]}, cookies=cookies
+    )
+    key_id = key_resp.json()["id"]
+
+    revoke_resp = await api_client.delete(f"/v1/users/{user_id}", headers=_auth(write_key))
+    assert revoke_resp.status_code == HTTPStatus.OK
+
+    keys_resp = await api_client.get("/v1/keys", headers=_auth(write_key))
+    revoked_key = next(k for k in keys_resp.json() if k["id"] == key_id)
+    assert revoked_key["revoked_at"] is not None
+
+
+async def test_keys_collection_rejects_scope_above_role_ceiling(api_client):
+    cookies = await _cookie_for("capped-writer@example.com", "write")
+    resp = await api_client.post("/v1/keys", json={"name": "too-much", "scopes": ["admin"]}, cookies=cookies)
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+
+
+async def test_keys_collection_allows_scope_within_role_ceiling(api_client):
+    cookies = await _cookie_for("in-band-writer@example.com", "write")
+    resp = await api_client.post(
+        "/v1/keys", json={"name": "in-band", "scopes": ["read", "write"]}, cookies=cookies
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    assert "raw_key" in resp.json()
+
+
+async def test_keys_collection_non_admin_sees_only_own(api_client):
+    alice_cookies = await _cookie_for("rest-alice@example.com", "write")
+    bob_cookies = await _cookie_for("rest-bob@example.com", "write")
+    await api_client.post("/v1/keys", json={"name": "alice-key", "scopes": ["read"]}, cookies=alice_cookies)
+    await api_client.post("/v1/keys", json={"name": "bob-key", "scopes": ["read"]}, cookies=bob_cookies)
+
+    resp = await api_client.get("/v1/keys", cookies=alice_cookies)
+    assert [k["name"] for k in resp.json()] == ["alice-key"]
+
+
+async def test_keys_item_owner_can_revoke_own(api_client):
+    cookies = await _cookie_for("self-revoker@example.com", "write")
+    create_resp = await api_client.post(
+        "/v1/keys", json={"name": "revoke-me", "scopes": ["read"]}, cookies=cookies
+    )
+    key_id = create_resp.json()["id"]
+
+    resp = await api_client.delete(f"/v1/keys/{key_id}", cookies=cookies)
+    assert resp.status_code == HTTPStatus.OK
+
+
+async def test_keys_item_non_owner_non_admin_gets_404(api_client):
+    owner_cookies = await _cookie_for("rest-owner@example.com", "write")
+    other_cookies = await _cookie_for("rest-other@example.com", "write")
+    create_resp = await api_client.post(
+        "/v1/keys", json={"name": "owners-key", "scopes": ["read"]}, cookies=owner_cookies
+    )
+    key_id = create_resp.json()["id"]
+
+    resp = await api_client.delete(f"/v1/keys/{key_id}", cookies=other_cookies)
+    assert resp.status_code == HTTPStatus.NOT_FOUND

@@ -173,3 +173,69 @@ async def test_require_scope_from_request_no_credential_is_unauthorized_when_con
     with pytest.raises(auth.AuthError) as exc_info:
         await auth.require_scope_from_request(_fake_request(), Scope.READ)
     assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
+
+
+# --- require_dashboard_role ---------------------------------------------------
+
+
+async def test_require_dashboard_role_bearer_admin_is_system_operator(write_key):
+    identity = await auth.require_dashboard_role(
+        _fake_request(authorization=f"Bearer {write_key}"), Scope.ADMIN
+    )
+    assert identity.email is None
+    assert identity.role == Scope.ADMIN
+    assert identity.user_id is None
+
+
+async def test_require_dashboard_role_bearer_non_admin_falls_through_to_unauthorized():
+    await auth.upsert_bootstrap_key("readonly:read:readonly-dashboard-key")
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_dashboard_role(
+            _fake_request(authorization="Bearer readonly-dashboard-key"), Scope.READ
+        )
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_require_dashboard_role_active_user_with_sufficient_role():
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+
+    await auth.upsert_bootstrap_user("writer@example.com", Scope.WRITE)
+    token = webauth.create_session_cookie_value("writer@example.com")
+    identity = await auth.require_dashboard_role(
+        _fake_request(cookies={SESSION_COOKIE_NAME: token}), Scope.WRITE
+    )
+    assert identity.email == "writer@example.com"
+    assert identity.role == Scope.WRITE
+    assert identity.user_id is not None
+
+
+async def test_require_dashboard_role_insufficient_role_is_forbidden():
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+
+    await auth.upsert_bootstrap_user("reader2@example.com", Scope.READ)
+    token = webauth.create_session_cookie_value("reader2@example.com")
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_dashboard_role(_fake_request(cookies={SESSION_COOKIE_NAME: token}), Scope.ADMIN)
+    assert exc_info.value.status_code == HTTPStatus.FORBIDDEN
+
+
+async def test_require_dashboard_role_no_credential_is_unauthorized():
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_dashboard_role(_fake_request(), Scope.READ)
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_require_dashboard_role_revoked_user_is_unauthorized():
+    from chuk_experiments_server import webauth
+    from chuk_experiments_server.constants import SESSION_COOKIE_NAME
+    from chuk_experiments_server.db import get_pool
+
+    await auth.upsert_bootstrap_user("revoked@example.com", Scope.ADMIN)
+    pool = await get_pool()
+    await pool.execute("UPDATE app_user SET revoked_at = now() WHERE email = $1", "revoked@example.com")
+    token = webauth.create_session_cookie_value("revoked@example.com")
+    with pytest.raises(auth.AuthError) as exc_info:
+        await auth.require_dashboard_role(_fake_request(cookies={SESSION_COOKIE_NAME: token}), Scope.READ)
+    assert exc_info.value.status_code == HTTPStatus.UNAUTHORIZED

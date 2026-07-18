@@ -25,7 +25,11 @@ _ADMIN_DSN = os.environ.get(
 _TEST_DB_NAME = "chuk_experiments_test"
 _TEST_DSN = _ADMIN_DSN.rsplit("/", 1)[0] + f"/{_TEST_DB_NAME}"
 
-_TABLES = ("artifact", "result", "run", "writeup", "experiment", "programme", "api_key")
+#: `team` is deliberately NOT truncated — it's seeded once by the migration
+#: (a single 'default' row) and never touched per-test, same as the schema
+#: itself; truncating it here would wipe that seed and break every
+#: team_id-FK insert (api_key, app_user) for the rest of the session.
+_TABLES = ("artifact", "result", "run", "writeup", "experiment", "programme", "api_key", "app_user")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -137,6 +141,19 @@ def _dashboard_auth_env():
     os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
     os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
     os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://test/auth/callback")
+
+
+@pytest.fixture(autouse=True)
+async def _dashboard_admin_user(_clean_tables, _dashboard_auth_env):
+    """Seeds the bootstrap admin app_user row after each truncate (mirrors
+    write_key) — authenticated_cookies signs a cookie for _TEST_ALLOWED_EMAIL,
+    and without a matching active app_user row every dashboard-identity check
+    (require_scope_from_request's cookie fallback, web.py's shell gate,
+    require_dashboard_role) would treat it as unauthenticated/revoked."""
+    from chuk_experiments_server import auth
+    from chuk_experiments_server.constants import Scope
+
+    await auth.upsert_bootstrap_user(_TEST_ALLOWED_EMAIL, Scope.ADMIN)
 
 
 @pytest.fixture
