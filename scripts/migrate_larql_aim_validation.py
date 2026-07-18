@@ -30,6 +30,9 @@ from pathlib import Path
 
 import httpx
 
+from _migrate_common import create_experiment as post_experiment
+from _migrate_common import create_run as post_run
+
 _PROGRAMME_SLUG = "larql"
 _DEFAULT_SOURCE = Path("../larql/bench/aim-validation")
 _SKIP_FILENAMES = {"matrix.json"}
@@ -83,9 +86,9 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
 
     for test_id, artifacts in by_test_id.items():
         slug = f"{_PROGRAMME_SLUG}-aim-{test_id.lower().replace(' ', '-')}"
-        resp = client.post(
-            "/v1/experiments",
-            json={
+        experiment = post_experiment(
+            client,
+            {
                 "programme": _PROGRAMME_SLUG,
                 "slug": slug,
                 "title": _TITLES.get(test_id, f"AIM Validation {test_id}"),
@@ -94,15 +97,15 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
                 "status": "completed",
             },
         )
-        if resp.status_code >= 400:
-            print(f"! failed to create experiment '{slug}': {resp.status_code} {resp.text}", file=sys.stderr)
+        if experiment is None:
             continue
         created_experiments += 1
 
         for path, artifact in artifacts:
-            run_resp = client.post(
-                f"/v1/experiments/{slug}/runs",
-                json={
+            run = post_run(
+                client,
+                slug,
+                {
                     "slug": artifact["model"],
                     "backend": "other",
                     "config": {
@@ -114,13 +117,11 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
                     "status": "completed",
                 },
             )
-            if run_resp.status_code >= 400:
-                print(f"! failed to create run for '{slug}': {run_resp.status_code} {run_resp.text}", file=sys.stderr)
+            if run is None:
                 continue
             created_runs += 1
-            run_id = run_resp.json()["id"]
             client.post(
-                f"/v1/runs/{run_id}/results",
+                f"/v1/runs/{run['id']}/results",
                 json={"name": "metrics", "value_json": artifact["metrics"], "notes": artifact.get("notes")},
             )
 

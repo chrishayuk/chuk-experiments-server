@@ -13,7 +13,7 @@ migrate_chris_experiments.py: it already happened, whatever shape the result
 took.
 
 Talks to a running server over the REST API, same as the other migration
-script (and reuses its `slugify` helper).
+scripts (and reuses their shared helpers).
 """
 
 import argparse
@@ -23,7 +23,9 @@ from pathlib import Path
 
 import httpx
 
-from migrate_chris_experiments import slugify
+from _migrate_common import create_experiment as post_experiment
+from _migrate_common import create_run as post_run
+from _migrate_common import slugify
 
 _PROGRAMME_SLUG = "chuk-mlx"
 _WRITEUP_FILENAMES = ("EXPERIMENT.md", "RESULTS.md", "README.md")
@@ -106,9 +108,9 @@ def run_migration(root: Path, base_url: str, api_key: str | None, dry_run: bool)
         takeaway = extract_takeaway(body)
         path = f"experiments/{exp_dir.name}"
 
-        resp = client.post(
-            "/v1/experiments",
-            json={
+        experiment = post_experiment(
+            client,
+            {
                 "programme": _PROGRAMME_SLUG,
                 "slug": slug,
                 "title": title,
@@ -117,19 +119,16 @@ def run_migration(root: Path, base_url: str, api_key: str | None, dry_run: bool)
                 "status": "completed",
             },
         )
-        if resp.status_code >= 400:
-            print(f"! failed to create experiment '{slug}': {resp.status_code} {resp.text}", file=sys.stderr)
+        if experiment is None:
             continue
 
         client.post(f"/v1/experiments/{slug}/writeups", json={"body_md": body})
 
-        run_resp = client.post(
-            f"/v1/experiments/{slug}/runs",
-            json={"slug": "historical", "backend": "other", "config": {"path": path}, "status": "completed"},
+        run = post_run(
+            client, slug, {"slug": "historical", "backend": "other", "config": {"path": path}, "status": "completed"}
         )
-        if run_resp.status_code < 400 and takeaway:
-            run_id = run_resp.json()["id"]
-            client.post(f"/v1/runs/{run_id}/results", json={"name": "summary", "notes": takeaway})
+        if run and takeaway:
+            client.post(f"/v1/runs/{run['id']}/results", json={"name": "summary", "notes": takeaway})
 
         created += 1
 

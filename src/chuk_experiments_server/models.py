@@ -113,6 +113,11 @@ class ExperimentCreate(BaseModel):
     design: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
     status: ExperimentStatus = ExperimentStatus.PLANNED
+    # Display name for the programme, used only the first time `programme` is
+    # seen — get_or_create_programme humanizes the slug otherwise, which is
+    # fine for "state-construction" -> "State Construction" but wrong for
+    # acronyms like "larql" -> "Larql".
+    programme_name: str | None = None
 
 
 class ExperimentUpdate(BaseModel):

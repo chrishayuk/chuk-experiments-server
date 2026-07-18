@@ -46,8 +46,13 @@ include = ["chuk_experiments_server*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 asyncio_mode = "auto"
+# One event loop for the whole session: db.get_pool() is a module-level
+# singleton (same lifetime assumption the real server process has), so a
+# per-test loop would bind the pool to a loop that's closed by the next test.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 addopts = "-v --strict-markers"
 
 [tool.ruff]

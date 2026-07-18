@@ -9,6 +9,8 @@ validate once, at the edge, in the same shape.
 
 from typing import Any
 
+import asyncpg
+
 from .constants import (
     CANCELLABLE_RUN_STATUSES,
     DEFAULT_LEASE_SECONDS,
@@ -186,22 +188,25 @@ async def get_experiment(slug: str) -> Experiment:
 
 
 async def create_experiment(data: ExperimentCreate) -> Experiment:
-    prog = await get_or_create_programme(ProgrammeCreate(slug=data.programme))
+    prog = await get_or_create_programme(ProgrammeCreate(slug=data.programme, name=data.programme_name))
     pool = await get_pool()
-    row = await pool.fetchrow(
-        """
-        INSERT INTO experiment (programme_id, slug, title, status, hypothesis, design, tags)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, slug, title, status, hypothesis, design, tags, created_at, updated_at
-        """,
-        prog.id,
-        data.slug,
-        data.title,
-        data.status.value,
-        data.hypothesis,
-        data.design,
-        data.tags,
-    )
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO experiment (programme_id, slug, title, status, hypothesis, design, tags)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, slug, title, status, hypothesis, design, tags, created_at, updated_at
+            """,
+            prog.id,
+            data.slug,
+            data.title,
+            data.status.value,
+            data.hypothesis,
+            data.design,
+            data.tags,
+        )
+    except asyncpg.UniqueViolationError:
+        raise ConflictError(f"Experiment '{data.slug}' already exists in programme '{data.programme}'") from None
     return await get_experiment(row["slug"])
 
 
@@ -369,27 +374,30 @@ async def enqueue_run(data: RunCreate) -> Run:
     exp_id = await pool.fetchval("SELECT id FROM experiment WHERE slug = $1", data.experiment)
     if exp_id is None:
         raise NotFoundError(f"No experiment with slug '{data.experiment}'")
-    row = await pool.fetchrow(
-        """
-        INSERT INTO run (
-            experiment_id, slug, status, backend, config, budget_seconds,
-            priority, depends_on, workspec, requirements, est_seconds
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO run (
+                experiment_id, slug, status, backend, config, budget_seconds,
+                priority, depends_on, workspec, requirements, est_seconds
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING id
+            """,
+            exp_id,
+            data.slug,
+            data.status.value,
+            data.backend,
+            data.config,
+            data.budget_seconds,
+            data.priority,
+            data.depends_on,
+            data.workspec,
+            data.requirements,
+            data.est_seconds,
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        RETURNING id
-        """,
-        exp_id,
-        data.slug,
-        data.status.value,
-        data.backend,
-        data.config,
-        data.budget_seconds,
-        data.priority,
-        data.depends_on,
-        data.workspec,
-        data.requirements,
-        data.est_seconds,
-    )
+    except asyncpg.UniqueViolationError:
+        raise ConflictError(f"Run '{data.slug}' already exists on experiment '{data.experiment}'") from None
     return await get_run(row["id"])
 
 

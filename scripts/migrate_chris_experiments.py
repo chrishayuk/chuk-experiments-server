@@ -33,6 +33,10 @@ from pathlib import Path
 
 import httpx
 
+from _migrate_common import create_experiment as post_experiment
+from _migrate_common import create_run as post_run
+from _migrate_common import slugify
+
 HEADING_RE = re.compile(r"^##\s+(.+)$")
 EXPERIMENT_RE = re.compile(r"^###\s+(.+)$")
 FIELD_RE = re.compile(r"^-\s+\*\*(\w+):\*\*\s*(.*)$")
@@ -56,11 +60,6 @@ class ParsedExperiment:
     raw_status: str | None
     summary: str | None
     result: str | None
-
-
-def slugify(text: str) -> str:
-    text = re.sub(r"[^a-z0-9]+", "-", text.lower())
-    return text.strip("-")
 
 
 def programme_slug_and_name(heading: str) -> tuple[str, str, bool]:
@@ -226,9 +225,9 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
         id_part, title = experiment_id_and_title(exp.heading)
         slug = build_slug(exp.programme_slug, id_part, title, seen_slugs)
 
-        resp = client.post(
-            "/v1/experiments",
-            json={
+        experiment = post_experiment(
+            client,
+            {
                 "programme": exp.programme_slug,
                 "slug": slug,
                 "title": title,
@@ -238,25 +237,24 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
                 "status": _MIGRATED_EXPERIMENT_STATUS,
             },
         )
-        if resp.status_code >= 400:
-            print(f"! failed to create experiment '{slug}': {resp.status_code} {resp.text}", file=sys.stderr)
+        if experiment is None:
             continue
 
         client.post(f"/v1/experiments/{slug}/writeups", json={"body_md": build_writeup(root, exp)})
 
-        run_resp = client.post(
-            f"/v1/experiments/{slug}/runs",
-            json={
+        run = post_run(
+            client,
+            slug,
+            {
                 "slug": "historical",
                 "backend": "other",
                 "config": {"path": exp.path},
                 "status": _MIGRATED_RUN_STATUS,
             },
         )
-        if run_resp.status_code < 400 and exp.result:
-            run_id = run_resp.json()["id"]
+        if run and exp.result:
             client.post(
-                f"/v1/runs/{run_id}/results",
+                f"/v1/runs/{run['id']}/results",
                 json={"name": "summary", "verdict": map_verdict(exp.raw_status), "notes": exp.result},
             )
 

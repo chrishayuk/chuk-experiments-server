@@ -20,7 +20,7 @@ unique name, one run per underlying lazarus experiment_id (dated slug), each
 step becoming a `result` row with its `data` dict as `value_json`.
 
 Talks to a running server over the REST API, same as the other migration
-scripts (and reuses migrate_chris_experiments.slugify).
+scripts (and reuses their shared helpers).
 """
 
 import argparse
@@ -32,7 +32,9 @@ from pathlib import Path
 
 import httpx
 
-from migrate_chris_experiments import slugify
+from _migrate_common import create_experiment as post_experiment
+from _migrate_common import create_run as post_run
+from _migrate_common import slugify
 
 _PROGRAMME_SLUG = "lazarus"
 _DEFAULT_SOURCE = Path.home() / ".chuk-lazarus" / "experiments"
@@ -129,9 +131,9 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
         slug = f"{_PROGRAMME_SLUG}-{name_slug}"
         representative = max(group, key=lambda e: len(e.steps))
 
-        resp = client.post(
-            "/v1/experiments",
-            json={
+        experiment = post_experiment(
+            client,
+            {
                 "programme": _PROGRAMME_SLUG,
                 "slug": slug,
                 "title": representative.name,
@@ -141,31 +143,29 @@ def run_migration(source: Path, base_url: str, api_key: str | None, dry_run: boo
                 "status": "completed",
             },
         )
-        if resp.status_code >= 400:
-            print(f"! failed to create experiment '{slug}': {resp.status_code} {resp.text}", file=sys.stderr)
+        if experiment is None:
             continue
         created_experiments += 1
 
         for entry in group:
             date_part = entry.created_at[:10] or "undated"
-            run_resp = client.post(
-                f"/v1/experiments/{slug}/runs",
-                json={
+            run = post_run(
+                client,
+                slug,
+                {
                     "slug": f"run-{date_part}-{entry.experiment_id[:8]}",
                     "backend": "other",
                     "config": {"model_id": entry.model_id, "lazarus_experiment_id": entry.experiment_id},
                     "status": "completed",
                 },
             )
-            if run_resp.status_code >= 400:
-                print(f"! failed to create run for '{slug}': {run_resp.status_code} {run_resp.text}", file=sys.stderr)
+            if run is None:
                 continue
             created_runs += 1
-            run_id = run_resp.json()["id"]
 
             for step in entry.steps:
                 client.post(
-                    f"/v1/runs/{run_id}/results",
+                    f"/v1/runs/{run['id']}/results",
                     json={"name": step.get("step_name", "result"), "value_json": step.get("data", {})},
                 )
 
