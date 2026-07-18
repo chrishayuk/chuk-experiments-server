@@ -104,9 +104,9 @@ class Settings:
             and self.dashboard_allowed_email
         )
 
-    # --- Internal API access (tools.py, web.py) ------------------------------
-    # MCP tools and dashboard routes call this server's own REST API over
-    # HTTP rather than service.py directly — see internal_client.py.
+    # --- Internal API access (tools.py) --------------------------------------
+    # MCP tools call this server's own REST API over HTTP rather than
+    # service.py directly — see internal_client.py.
 
     @property
     def internal_api_base_url(self) -> str:
@@ -114,11 +114,14 @@ class Settings:
 
     @property
     def internal_api_key(self) -> str | None:
-        """Bearer key the dashboard uses for its own REST calls — the human
-        is already authenticated via Google sign-in (webauth.py); this key
-        just satisfies the REST layer's bearer-auth requirement on their
-        behalf. MCP tools don't use this — they forward the calling agent's
-        own key instead (see tools.py)."""
+        """Unused by any code path since the dashboard was rewritten as a
+        client-side SPA — the browser now calls /v1/* directly via its own
+        Google session cookie (auth.require_dashboard_role /
+        require_scope_from_request), no server-side proxy layer to
+        authenticate. Kept only so existing Fly secrets/test fixtures don't
+        need touching for this alone; safe to remove entirely in a future
+        cleanup pass. MCP tools never used this either — they forward the
+        calling agent's own key instead (see tools.py)."""
         return os.environ.get("INTERNAL_API_KEY")
 
 
