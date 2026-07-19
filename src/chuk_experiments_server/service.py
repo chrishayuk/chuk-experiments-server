@@ -52,6 +52,7 @@ from .models import (
     ExperimentSummary,
     ExperimentUpdate,
     IndexEntry,
+    PinSummary,
     Programme,
     ProgrammeCreate,
     QueueSweepResult,
@@ -905,10 +906,21 @@ async def get_pin(name: str) -> Artifact:
     return await get_artifact(artifact_id)
 
 
-async def list_pins() -> list[ArtifactPin]:
+async def list_pins() -> list[PinSummary]:
+    """Denormalized with just enough of each pin's target artifact (run,
+    kind, uri, its own name) that the dashboard can render a pins list in
+    one call instead of one lineage-style follow-up request per row."""
     pool = await get_pool()
-    rows = await pool.fetch("SELECT id, name, artifact_id, updated_at FROM artifact_pin ORDER BY name")
-    return [ArtifactPin.model_validate(dict(row)) for row in rows]
+    rows = await pool.fetch(
+        """
+        SELECT p.id, p.name, p.artifact_id, p.updated_at,
+               a.run_id, a.kind, a.uri, a.name AS artifact_name
+        FROM artifact_pin p
+        JOIN artifact a ON a.id = p.artifact_id
+        ORDER BY p.name
+        """
+    )
+    return [PinSummary.model_validate(dict(row)) for row in rows]
 
 
 # ---------------------------------------------------------------------------

@@ -642,7 +642,10 @@ async def test_pins_crud_and_write_scope_gating(api_client, write_key):
 
     listed = await api_client.get("/v1/pins", headers=_auth(write_key))
     assert listed.status_code == HTTPStatus.OK
-    assert [p["name"] for p in listed.json()] == ["harness:latest"]
+    pins = listed.json()
+    assert [p["name"] for p in pins] == ["harness:latest"]
+    assert pins[0]["run_id"] == run_id
+    assert pins[0]["uri"] == "gdrive://abc"
 
 
 async def test_runs_compare(api_client, write_key):

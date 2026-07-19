@@ -35,7 +35,9 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   `"tok-v12-tokenizer:latest"`) at a specific artifact and repoints it on
   demand, W&B-`"latest"`/`"best"`-style — so "the current best checkpoint"
   can be a stable thing to ask for even as which artifact that means keeps
-  changing.
+  changing. Every pin is browsable on the dashboard's **Pins** screen, and
+  a pinned artifact shows a "pinned as ..." badge inline on its run's
+  detail page.
 - **Queue and lease runs for a training harness.** A harness can peek the
   queue, atomically claim a batch (`FOR UPDATE SKIP LOCKED`, greedy
   bin-packing by priority/estimated seconds), respect dependency ordering

@@ -156,11 +156,16 @@ async def test_pin_set_get_list_and_repoint():
     await service.set_pin("harness:latest", artifact_a.id)
     resolved = await service.get_pin("harness:latest")
     assert resolved.id == artifact_a.id
-    assert [p.name for p in await service.list_pins()] == ["harness:latest"]
+    pins = await service.list_pins()
+    assert [p.name for p in pins] == ["harness:latest"]
+    assert pins[0].run_id == run.id
+    assert pins[0].uri == "gdrive://a"
+    assert pins[0].kind == "other"
 
     await service.set_pin("harness:latest", artifact_b.id)
     resolved_again = await service.get_pin("harness:latest")
     assert resolved_again.id == artifact_b.id
+    assert (await service.list_pins())[0].uri == "gdrive://b"
 
 
 async def test_set_pin_missing_artifact_raises_not_found():

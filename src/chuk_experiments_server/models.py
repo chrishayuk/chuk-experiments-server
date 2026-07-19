@@ -255,6 +255,21 @@ class ArtifactPin(RecordModel):
     updated_at: datetime
 
 
+class PinSummary(RecordModel):
+    """list_pins' shape — an ArtifactPin denormalized with just enough of
+    its target artifact (run, kind, uri, the artifact's own name) to render
+    a pins list without a second request per row."""
+
+    id: int
+    name: str
+    artifact_id: int
+    updated_at: datetime
+    run_id: str
+    kind: ArtifactKind
+    uri: str
+    artifact_name: str | None = None
+
+
 class ArtifactPinSet(BaseModel):
     artifact_id: int
 
