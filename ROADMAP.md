@@ -129,6 +129,19 @@ decisions made along the way that the spec didn't originally cover.
   substituted in, one-click copy) the moment a new key is generated —
   there was previously no in-app guidance on how to actually connect an
   MCP client at all.
+- **`POST /runs/{id}/artifacts/upload-raw`** — a multipart route (`curl -F
+  file=@path`) for real files from a shell, added because the base64-in-JSON
+  routes have a structural problem no amount of clever piping fixes: an MCP
+  tool's arguments are always emitted as literal text by the calling model,
+  so `content_base64` shows up in full in that model's own transcript no
+  matter how it was constructed upstream — a real, felt problem once the
+  v12-tokenizer harness (itself an agent framework) started uploading its
+  own files mid-task. `upload-raw` streams bytes straight from disk over
+  the network instead; only curl's short JSON response ever reaches the
+  agent's context, and it needs nothing installed beyond curl, unlike a
+  local CLI wrapper (impractical once "the servers are all remote").
+  `upload_artifact_to_drive`/`upload_artifacts_batch` MCP tool docstrings
+  now explicitly steer toward it for anything beyond a trivial inline size.
 
 ## Fixed (found via code review, 2026-07-19)
 

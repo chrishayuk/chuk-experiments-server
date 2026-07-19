@@ -320,22 +320,34 @@ async def upload_artifact_to_drive(
     meta: dict[str, Any] | None = None,
 ) -> Any:
     """Upload local file content straight to Google Drive and register the
-    resulting gdrive:// artifact for a run, in one step — use this whenever
-    you have actual bytes (a harness script, a small dataset, a config/pin
-    file, a log or report) rather than a URI that's already reachable.
+    resulting gdrive:// artifact for a run, in one step.
+
+    IMPORTANT — content_base64 is an MCP tool argument, which means YOU (the
+    calling model) must emit the entire base64 string as literal text to
+    make this call. For anything beyond a trivial size (a short config
+    snippet, a few hundred bytes) that floods your own context/transcript
+    for no reason. If you have shell access, prefer:
+        curl -X POST <base_url>/v1/runs/{run_id}/artifacts/upload-raw \
+          -H "Authorization: Bearer <key>" \
+          -F "file=@<local_path>" -F "name=<name>" -F "kind=<kind>"
+    which streams the file straight from disk over the network — only the
+    short JSON response ever reaches your context, regardless of file
+    size, and it needs nothing installed beyond curl. Reach for this tool
+    only when you already have the bytes in-context anyway (e.g. content
+    you just generated) and it's genuinely small.
 
     Content-addressed by (name, sha256 of the bytes): if this exact content
     was already uploaded under this name by an earlier run, that upload is
     reused instead of uploading again — register a harness/dataset under
     the same name every time you use it (e.g. "tok-v12-harness"), and it
-    only gets stored once no matter how many runs reference it. Check
-    get_artifact_lineage on the returned artifact id to see every run that
-    has used a given piece of content.
+    only gets stored once no matter how many runs reference it (same dedup
+    behavior via the curl route above). Check get_artifact_lineage on the
+    returned artifact id to see every run that has used a given piece of
+    content.
 
-    Intended for small-to-moderate provenance/config/log/dataset files, not
-    multi-MB+ checkpoints — those should go through the R2 presign flow
-    instead (POST /v1/runs/{run_id}/artifacts/presign), which never routes
-    bytes through this server at all.
+    Not for multi-MB+ checkpoints either way — those should go through the
+    R2 presign flow instead (POST /v1/runs/{run_id}/artifacts/presign),
+    which never routes bytes through this server at all.
 
     Args:
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
@@ -364,6 +376,14 @@ async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> An
     ready at the same time (e.g. a harness script plus its canonicalizer).
     Each item dedups independently by (name, sha256), including against an
     earlier item in the same batch.
+
+    Same caution as upload_artifact_to_drive applies, multiplied by item
+    count: every item's content_base64 is emitted as literal text by you,
+    the calling model. For real files on disk, issue one
+    `curl -F file=@path ... /artifacts/upload-raw` call per file instead
+    (see upload_artifact_to_drive's docstring) — a few small curl calls
+    cost you far less context than one batch call carrying several files'
+    worth of base64.
 
     All items are validated before anything is uploaded — one bad item
     fails the whole batch rather than leaving some files stored and others

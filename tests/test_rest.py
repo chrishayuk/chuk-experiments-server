@@ -4,6 +4,7 @@ disposable test Postgres, not just service.py directly. Focused on HTTP-
 specific behavior (auth gating, status codes, param parsing, JSON shape);
 combinatorial business-logic edge cases are covered in test_service_*.py."""
 
+import json
 from http import HTTPStatus
 
 from chuk_experiments_server import auth as auth_module
@@ -655,6 +656,169 @@ async def test_artifacts_upload_rejects_oversized_content(api_client, write_key,
     resp = await api_client.post(
         f"/v1/runs/{run_id}/artifacts/upload",
         json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8=", "name": "x"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_raw_creates_artifact(api_client, write_key, monkeypatch):
+    """Multipart upload — the curl -F path — hits the same dedup/register
+    core as the JSON routes, just with bytes read straight from the
+    uploaded file instead of base64-decoded."""
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    monkeypatch.setattr(
+        drive_storage, "upload_bytes", lambda service, filename, content, parent_id: "fake-file-id"
+    )
+
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("harness.py", b"print('hi')", "text/plain")},
+        data={"name": "tok-v12-harness", "kind": "other"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["uri"] == "gdrive://fake-file-id"
+    assert body["name"] == "tok-v12-harness"
+    assert body["role"] == "produced"
+    assert body["meta"]["source_path"] == "harness.py"
+    assert "drive_url" in body["meta"]
+
+
+async def test_artifacts_upload_raw_dedups_by_name_and_sha(api_client, write_key, monkeypatch):
+    upload_calls = _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_a = (await _enqueue_run(api_client, write_key)).json()["id"]
+    run_b_resp = await api_client.post(
+        "/v1/experiments/cn-7/runs", json={"slug": "seed-1"}, headers=_auth(write_key)
+    )
+    run_b = run_b_resp.json()["id"]
+
+    first = await api_client.post(
+        f"/v1/runs/{run_a}/artifacts/upload-raw",
+        files={"file": ("harness.py", b"print('hi')", "text/plain")},
+        data={"name": "tok-v12-harness"},
+        headers=_auth(write_key),
+    )
+    second = await api_client.post(
+        f"/v1/runs/{run_b}/artifacts/upload-raw",
+        files={"file": ("harness.py", b"print('hi')", "text/plain")},
+        data={"name": "tok-v12-harness"},
+        headers=_auth(write_key),
+    )
+
+    assert first.status_code == HTTPStatus.CREATED
+    assert second.status_code == HTTPStatus.CREATED
+    assert len(upload_calls) == 1
+    assert first.json()["role"] == "produced"
+    assert second.json()["role"] == "used"
+    assert second.json()["uri"] == first.json()["uri"]
+
+
+async def test_artifacts_upload_raw_requires_file(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        data={"name": "x"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_raw_requires_name(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_raw_rejects_oversized_content(api_client, write_key, monkeypatch):
+    from chuk_experiments_server import rest
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(rest, "_MAX_UPLOAD_BYTES", 4)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello world", "text/plain")},
+        data={"name": "x"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_raw_not_configured(api_client, write_key, monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: False))
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+        data={"name": "x"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
+
+
+async def test_artifacts_upload_raw_meta_round_trips_but_cannot_override_drive_url(
+    api_client, write_key, monkeypatch
+):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+        data={"name": "x", "meta": json.dumps({"note": "custom", "drive_url": "https://evil.example.com"})},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["meta"]["note"] == "custom"
+    assert body["meta"]["drive_url"].startswith("https://drive.google.com/")
+
+
+async def test_artifacts_upload_raw_rejects_invalid_meta_json(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+        data={"name": "x", "meta": "not-json"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifacts_upload_raw_rejects_invalid_role(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-raw",
+        files={"file": ("x.txt", b"hello", "text/plain")},
+        data={"name": "x", "role": "not-a-real-role"},
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST

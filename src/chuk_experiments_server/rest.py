@@ -12,6 +12,7 @@ therefore registered ONCE with `methods=[...]` and dispatch on
 import base64
 import binascii
 import hashlib
+import json
 import logging
 from functools import wraps
 from http import HTTPStatus
@@ -425,45 +426,56 @@ def _decode_artifact_content(content_base64: str) -> tuple[bytes | None, str | N
     return content, None
 
 
-async def _upload_or_dedup_artifact(run_id: str, data: ArtifactUploadRequest, content: bytes) -> Any:
+async def _upload_or_dedup_artifact(
+    run_id: str,
+    *,
+    name: str,
+    kind: str,
+    role: ArtifactRole | None,
+    filename: str,
+    content: bytes,
+    meta: dict[str, Any],
+) -> Any:
     """Content-addressed by (name, sha256): if this exact content was
     already uploaded under this name — by an earlier run, or an earlier item
     in the same batch — that upload is reused (role=used) instead of
-    uploading again."""
+    uploading again. Shared by every upload route (JSON single/batch,
+    multipart raw) so there's exactly one dedup implementation regardless
+    of how the bytes arrived."""
     content_sha256 = hashlib.sha256(content).hexdigest()
-    existing = await service.find_artifact_by_name_sha(data.name, content_sha256)
+    existing = await service.find_artifact_by_name_sha(name, content_sha256)
     if existing is not None:
         uri = existing.uri
         # drive_url is pinned to the original upload's value (never the
         # caller's) — a caller-controlled meta.drive_url would otherwise let
         # them redirect a future /download to an arbitrary URL, since
         # artifact_download follows this field unconditionally.
-        meta = {**data.meta, "source_path": data.filename}
+        merged_meta = {**meta, "source_path": filename}
         if "drive_url" in existing.meta:
-            meta["drive_url"] = existing.meta["drive_url"]
-        role = data.role or ArtifactRole.USED
+            merged_meta["drive_url"] = existing.meta["drive_url"]
+        resolved_role = role or ArtifactRole.USED
     else:
         drive_client = drive_storage.get_client()
         root_id = drive_storage.ensure_folder(drive_client, drive_storage.ARCHIVE_ROOT_NAME, None)
         parent_id = drive_storage.ensure_folder_path(
-            drive_client, root_id, ("artifacts", data.name, content_sha256[:12])
+            drive_client, root_id, ("artifacts", name, content_sha256[:12])
         )
-        file_id = drive_storage.upload_bytes(drive_client, data.filename, content, parent_id)
+        file_id = drive_storage.upload_bytes(drive_client, filename, content, parent_id)
         uri = f"{GDRIVE_URI_PREFIX}{file_id}"
-        meta = {
-            **data.meta,
+        merged_meta = {
+            **meta,
             "drive_url": drive_storage.drive_url(file_id),
-            "source_path": data.filename,
+            "source_path": filename,
         }
-        role = data.role or ArtifactRole.PRODUCED
+        resolved_role = role or ArtifactRole.PRODUCED
 
     artifact_data = ArtifactCreate(
-        kind=data.kind,
+        kind=kind,
         uri=uri,
         sha256=content_sha256,
-        meta=meta,
-        name=data.name,
-        role=role,
+        meta=merged_meta,
+        name=name,
+        role=resolved_role,
     )
     return await service.register_artifact(run_id, artifact_data)
 
@@ -493,7 +505,15 @@ async def run_artifacts_upload(request: Request) -> Response:
     if error is not None:
         return JSONResponse({"error": error}, status_code=HTTPStatus.BAD_REQUEST.value)
 
-    artifact = await _upload_or_dedup_artifact(run_id, data, content)
+    artifact = await _upload_or_dedup_artifact(
+        run_id,
+        name=data.name,
+        kind=data.kind,
+        role=data.role,
+        filename=data.filename,
+        content=content,
+        meta=data.meta,
+    )
     return _ok(artifact, status=HTTPStatus.CREATED)
 
 
@@ -527,10 +547,82 @@ async def run_artifacts_upload_batch(request: Request) -> Response:
         decoded_items.append(content)
 
     results = [
-        await _upload_or_dedup_artifact(run_id, item, content)
+        await _upload_or_dedup_artifact(
+            run_id,
+            name=item.name,
+            kind=item.kind,
+            role=item.role,
+            filename=item.filename,
+            content=content,
+            meta=item.meta,
+        )
         for item, content in zip(batch.items, decoded_items, strict=True)
     ]
     return _ok(results, status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/runs/{run_id}/artifacts/upload-raw", methods=["POST"])
+@_with_error_handling
+async def run_artifacts_upload_raw(request: Request) -> Response:
+    """Multipart upload for a real file from a shell (`curl -F
+    file=@path`), never an MCP tool call — the bytes never pass through
+    the calling model's own context this way, unlike `.../upload`'s
+    `content_base64` (an MCP tool argument, which the calling model must
+    emit as literal text and which therefore shows up in full in its own
+    transcript). Prefer this route for anything beyond a trivial inline
+    size, especially from a remote/sandboxed environment where installing
+    this project's own package isn't practical — curl needs nothing
+    installed at all.
+
+    Form fields: file (required), name (required, dedup key), kind
+    (optional, default "other"), role (optional, auto-inferred if
+    omitted), meta (optional, a JSON-encoded object string)."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    if not settings.google_drive_configured:
+        return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    run_id = request.path_params["run_id"]
+    await service.get_run(run_id)  # 404s if the run doesn't exist
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        return JSONResponse({"error": "file is required"}, status_code=HTTPStatus.BAD_REQUEST.value)
+    name = form.get("name")
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=HTTPStatus.BAD_REQUEST.value)
+
+    content = await upload.read()
+    if len(content) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"content exceeds {_MAX_UPLOAD_BYTES} bytes — use the R2 presign flow for large files"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
+    try:
+        meta = json.loads(form["meta"]) if form.get("meta") else {}
+    except (json.JSONDecodeError, TypeError):
+        return JSONResponse(
+            {"error": "meta must be a JSON-encoded object"}, status_code=HTTPStatus.BAD_REQUEST.value
+        )
+    try:
+        role = ArtifactRole(form["role"]) if form.get("role") else None
+    except ValueError:
+        return JSONResponse(
+            {"error": f"role must be one of {[r.value for r in ArtifactRole]}"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+
+    artifact = await _upload_or_dedup_artifact(
+        run_id,
+        name=name,
+        kind=form.get("kind", "other"),
+        role=role,
+        filename=upload.filename or name,
+        content=content,
+        meta=meta,
+    )
+    return _ok(artifact, status=HTTPStatus.CREATED)
 
 
 @mcp.endpoint("/v1/artifacts/{artifact_id:int}/download", methods=["GET"])

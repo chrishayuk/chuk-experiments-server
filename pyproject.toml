@@ -35,6 +35,11 @@ dependencies = [
     # scripts, so these are real runtime deps, not an optional extra.
     "google-auth>=2.23.0",
     "google-api-python-client>=2.100.0",
+    # Starlette's request.form() (POST /v1/runs/{run_id}/artifacts/upload-raw,
+    # the multipart upload route) needs this to parse multipart bodies —
+    # already present transitively, declared explicitly rather than relied
+    # on implicitly.
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

@@ -20,8 +20,23 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
 - **Store and dedup artifacts.** Register a pointer to anything already
   reachable (`s3://`, `gdrive://`, `https://`) — never a local `file://`
   path — or hand this server actual bytes and it uploads them to Google
-  Drive for you (`POST /runs/{id}/artifacts/upload`, or `.../upload-batch`
-  for several files in one round trip). Uploads are **content-addressed by
+  Drive for you. Three ways to hand over bytes: `POST
+  /runs/{id}/artifacts/upload` (JSON + base64, single file), `.../upload-batch`
+  (JSON + base64, several files in one round trip), or `.../upload-raw`
+  (multipart, one real file straight off disk — the one to reach for from
+  a shell, since curl streams the file directly and nothing but the JSON
+  response ever has to pass through an agent's own context):
+  ```bash
+  curl -X POST https://chuk-experiments-server.fly.dev/v1/runs/$RUN_ID/artifacts/upload-raw \
+    -H "Authorization: Bearer $KEY" \
+    -F "file=@tokenizer_bench.py" -F "name=tok-v12-harness" -F "kind=other"
+  ```
+  The MCP tools (`upload_artifact_to_drive`/`upload_artifacts_batch`) exist
+  for the case an agent already has small bytes in-context — their
+  `content_base64` argument is necessarily emitted as literal text by the
+  calling model, so it shows up in full in that model's own transcript;
+  fine for a short snippet, real friction for anything larger, which is
+  exactly what `upload-raw` avoids. Uploads are **content-addressed by
   (name, sha256)**: register the same harness script or dataset under the
   same name across many runs (or several times in one batch) and it's
   stored exactly once — every later reference just gets a lightweight
