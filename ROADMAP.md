@@ -221,3 +221,47 @@ code before fixing, each verified with a new regression test:
    run lifecycle into this server's `/v1/queue` contract. Explicitly
    sequenced after the dashboard was fully live, which it now is.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
+
+## New features under consideration (2026-07-19)
+
+A review of what W&B/MLflow/LangSmith-style tools do well, filtered against
+a hard constraint: "experiment" here spans model training, agent behavior,
+MCP tool/server behavior, and `cell80/` architecture research — not just
+ML runs (see `~/chris-source/cell80/experiments/`) — so anything
+ML-training-only (live loss-curve streaming, GPU-utilization panels) is
+out of scope. Prioritized, starting with the trace/span tree:
+
+1. **Trace/span tree per run** — building next. Today a run only gets flat
+   `result` rows, with no record of the individual LLM calls, MCP tool
+   invocations, or agent sub-steps that produced them — the single
+   biggest gap versus an LLM/agent-eval tool (LangSmith/Langfuse), and
+   *more* relevant to agent/MCP/cell80 experiments than to ML training: an
+   agent transcript or a tool-call sequence is exactly a span tree. New
+   `span` table (`run_id`, `parent_span_id`, `kind`, `input`/`output`
+   JSON, timing, cost) rolls up into per-run cost/latency for free,
+   replacing the single `run.cost_usd` total.
+2. **Gates as a first-class concept** — the v12-tokenizer funnel's `design`
+   JSON already encodes real gates (G0-G3, threshold, pass condition),
+   currently buried in prose. A dedicated `gate` sub-resource (name,
+   threshold, observed value, status) makes "has TOK-0 cleared G0 yet?"
+   queryable and dashboard-visible instead of requiring a write-up read.
+3. **Declarative multi-run submission** (generalized from W&B Sweeps —
+   explicitly not porting Bayesian/GP optimization, which only pays off
+   for continuous training loops). The generalizable kernel is "expand a
+   parameter grid into N queued runs against one experiment," reusing the
+   existing queue/lease system — a temperature x prompt-version x model
+   grid for an agent eval works the same as an opcode x architecture grid
+   for cell80.
+4. **Promote a failed result to a regression fixture** (Braintrust-style)
+   — flag a specific failing input as a permanent case auto-included in
+   future comparable runs. Useful for agent/MCP behavior regressions
+   specifically, not ML-specific at all.
+5. **Notifications on gate pass/fail or run completion** — a webhook/Slack
+   ping instead of a manual check-back on long-running async work.
+
+Smaller, not-really-new-feature items noted alongside these: a Compare
+view in the dashboard (UI only, over the existing `compare_runs`), using
+this server as the persistent system of record for Lazarus/KV-Anatomist
+experiments (zero new code — Lazarus's own `ExperimentStore` is in-memory
+only and doesn't survive a restart), a session/agent provenance tag on
+write-ups/runs, and a stage label (`:staging`/`:prod`) on `artifact_pin`.
