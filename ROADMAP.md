@@ -254,6 +254,37 @@ decisions made along the way that the spec didn't originally cover.
   "research going stale" signal the same review proposed, without building
   the fuller research-debt screen it also described.
 
+- **Systematic hypothesis/write-up quality review across all experiments**
+  (2026-07-19) — 335 of 369 experiments had a hypothesis, 198 write-ups
+  across 189 experiments; the TOK-0 jargon-dump case that motivated the
+  docstring fix (above) was not the only one. A full DB backup was taken
+  first, since unlike the byte-verified artifact migration this pass
+  involves real content judgment, not a mechanical hash match. First full
+  attempt (37 batches) mostly failed — embedding the raw production DB
+  credential directly in each agent prompt tripped a safety classifier on
+  ~40% of them, and fragile nested-quote shell commands left most of the
+  rest returning empty results; fixed by having each agent derive its own
+  DB connection string at runtime (`npx neonctl connection-string`, never
+  pasted into a prompt) and write a real script file instead of an inline
+  multi-quoted one-liner. Second attempt reviewed all 369 experiments,
+  flagging 121 for a hypothesis and/or write-up rewrite; an adversarial
+  verify pass (a separate agent checking each proposal against the
+  original for invented/dropped/strengthened/softened content) caught that
+  only 47 (39%) were actually faithful on the first try — real failure
+  modes included fabricated specifics ("e.g., 'X is the capital of Y'-style
+  city facts" invented for a template the original never named), fabricated
+  counts, scope creep (a tool promoted into a co-equal claimed capability),
+  silently dropped `**Path:**` metadata lines, and a 317-line write-up
+  truncated to a 52-line stub while calling itself a full revision. The 47
+  faithful rewrites were applied immediately; the other 74 went through a
+  corrective pass (each agent given the specific verifier concern and
+  asked to fix exactly that, nothing else) and re-verify, landing 73/74
+  faithful (one flagged "still failing" only because the verify agent left
+  a boolean unset in its structured output despite writing a clearly
+  positive analysis — confirmed faithful by hand and applied too). Net: 121
+  of 369 experiments got a rewritten hypothesis and/or write-up, all
+  content-preserving, all adversarially checked before touching production.
+
 ## Fixed (found via code review, 2026-07-19)
 
 A review of `src/chuk_experiments_server/` (not the SPA, migrations, or
@@ -382,23 +413,6 @@ code before fixing, each verified with a new regression test:
    run lifecycle into this server's `/v1/queue` contract. Explicitly
    sequenced after the dashboard was fully live, which it now is.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
-4. **Systematic hypothesis/write-up quality review across all experiments**
-   (in progress, 2026-07-19) — 335 of 369 experiments have a hypothesis,
-   198 write-ups across 189 experiments; the TOK-0 jargon-dump case that
-   motivated the docstring fix (see "Done" above) is very unlikely to be
-   the only one. Multi-agent workflow reviews each in batches, proposes a
-   faithful rewrite (preserving the exact original claim/every factual
-   finding) where needed, then adversarially verifies each proposal before
-   anything is ever applied to production — a full database backup was
-   taken first specifically because this pass, unlike the byte-verified
-   artifact migration, involves real content judgment, not a mechanical
-   hash match. First full attempt (37 batches) mostly failed: embedding
-   the raw production DB credential directly in each of 37 agent prompts
-   tripped a safety classifier on ~40% of them, and fragile nested-quote
-   shell commands left most of the rest returning empty results — fixed by
-   having each agent derive its own DB connection string at runtime
-   (`npx neonctl connection-string`, never pasted into a prompt) and write
-   a real script file instead of an inline multi-quoted one-liner.
 
 ## New features under consideration (2026-07-19)
 
