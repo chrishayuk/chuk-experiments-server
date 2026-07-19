@@ -1192,14 +1192,78 @@ async def _cookie_for(email: str, role: str) -> dict:
 async def test_me_bearer_admin(api_client, write_key):
     resp = await api_client.get("/v1/me", headers=_auth(write_key))
     assert resp.status_code == HTTPStatus.OK
-    assert resp.json() == {"email": None, "role": "admin"}
+    assert resp.json() == {
+        "email": None,
+        "role": "admin",
+        "github_token_set": False,
+        "huggingface_token_set": False,
+    }
 
 
 async def test_me_cookie_reflects_signed_in_users_role(api_client):
     cookies = await _cookie_for("me-reader@example.com", "read")
     resp = await api_client.get("/v1/me", cookies=cookies)
     assert resp.status_code == HTTPStatus.OK
-    assert resp.json() == {"email": "me-reader@example.com", "role": "read"}
+    assert resp.json() == {
+        "email": "me-reader@example.com",
+        "role": "read",
+        "github_token_set": False,
+        "huggingface_token_set": False,
+    }
+
+
+def _token_encryption(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from chuk_experiments_server.config import settings
+
+    key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setattr(type(settings), "token_encryption_key", property(lambda self: key))
+
+
+async def test_me_tokens_put_sets_token_and_reflected_on_me(api_client, monkeypatch):
+    _token_encryption(monkeypatch)
+    cookies = await _cookie_for("token-user@example.com", "write")
+
+    resp = await api_client.put("/v1/me/tokens/github", json={"token": "ghp_realvalue"}, cookies=cookies)
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"provider": "github", "set": True}
+
+    me_resp = await api_client.get("/v1/me", cookies=cookies)
+    assert me_resp.json()["github_token_set"] is True
+    assert me_resp.json()["huggingface_token_set"] is False
+
+
+async def test_me_tokens_delete_clears_token(api_client, monkeypatch):
+    _token_encryption(monkeypatch)
+    cookies = await _cookie_for("token-user2@example.com", "write")
+    await api_client.put("/v1/me/tokens/huggingface", json={"token": "hf_x"}, cookies=cookies)
+
+    resp = await api_client.delete("/v1/me/tokens/huggingface", cookies=cookies)
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"provider": "huggingface", "set": False}
+
+    me_resp = await api_client.get("/v1/me", cookies=cookies)
+    assert me_resp.json()["huggingface_token_set"] is False
+
+
+async def test_me_tokens_rejects_invalid_provider(api_client, monkeypatch):
+    _token_encryption(monkeypatch)
+    cookies = await _cookie_for("token-user3@example.com", "write")
+
+    resp = await api_client.put("/v1/me/tokens/bitbucket", json={"token": "x"}, cookies=cookies)
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_me_tokens_requires_signin(api_client):
+    resp = await api_client.put("/v1/me/tokens/github", json={"token": "x"})
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_me_tokens_bearer_admin_rejected_no_owning_user(api_client, write_key, monkeypatch):
+    _token_encryption(monkeypatch)
+    resp = await api_client.put("/v1/me/tokens/github", json={"token": "x"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 async def test_users_collection_requires_admin_role(api_client):

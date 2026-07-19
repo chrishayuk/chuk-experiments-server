@@ -8,7 +8,7 @@ import pytest
 
 from chuk_experiments_server import service
 from chuk_experiments_server.auth import AuthError
-from chuk_experiments_server.constants import Scope
+from chuk_experiments_server.constants import Scope, TokenProvider
 from chuk_experiments_server.models import DashboardIdentity
 
 
@@ -187,3 +187,93 @@ async def test_revoke_api_key_admin_can_revoke_anyones():
     keys = await service.list_api_keys(_admin())
     revoked = next(k for k in keys if k.id == created.id)
     assert revoked.revoked_at is not None
+
+
+# --- Per-user GitHub/HF tokens ----------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _token_encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from chuk_experiments_server.config import settings
+
+    key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setattr(type(settings), "token_encryption_key", property(lambda self: key))
+
+
+async def test_set_and_get_user_token_round_trips():
+    user = await service.create_user("tokenuser@example.com", Scope.WRITE)
+    identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)
+
+    await service.set_user_token(identity, TokenProvider.GITHUB, "ghp_realvalue")
+
+    assert await service.get_user_token(user.id, TokenProvider.GITHUB) == "ghp_realvalue"
+    assert await service.get_user_token(user.id, TokenProvider.HUGGINGFACE) is None
+
+
+async def test_get_user_token_status_reflects_set_tokens():
+    user = await service.create_user("tokenuser2@example.com", Scope.WRITE)
+    identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)
+
+    assert await service.get_user_token_status(user.id) == {
+        "github_token_set": False,
+        "huggingface_token_set": False,
+    }
+
+    await service.set_user_token(identity, TokenProvider.HUGGINGFACE, "hf_realvalue")
+
+    assert await service.get_user_token_status(user.id) == {
+        "github_token_set": False,
+        "huggingface_token_set": True,
+    }
+
+
+async def test_get_user_token_status_none_user_id_is_all_false():
+    assert await service.get_user_token_status(None) == {
+        "github_token_set": False,
+        "huggingface_token_set": False,
+    }
+
+
+async def test_clear_user_token_removes_it():
+    user = await service.create_user("tokenuser3@example.com", Scope.WRITE)
+    identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)
+    await service.set_user_token(identity, TokenProvider.GITHUB, "ghp_realvalue")
+
+    await service.clear_user_token(identity, TokenProvider.GITHUB)
+
+    assert await service.get_user_token(user.id, TokenProvider.GITHUB) is None
+
+
+async def test_set_user_token_rejects_bearer_admin_session_with_no_user():
+    with pytest.raises(service.ValidationError):
+        await service.set_user_token(_admin(), TokenProvider.GITHUB, "x")
+
+
+async def test_set_user_token_rejects_when_encryption_not_configured(monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "token_encryption_key", property(lambda self: None))
+    user = await service.create_user("tokenuser4@example.com", Scope.WRITE)
+    identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)
+
+    with pytest.raises(service.ValidationError):
+        await service.set_user_token(identity, TokenProvider.GITHUB, "x")
+
+
+async def test_get_user_token_none_when_user_has_no_token():
+    user = await service.create_user("tokenuser5@example.com", Scope.WRITE)
+    assert await service.get_user_token(user.id, TokenProvider.GITHUB) is None
+
+
+async def test_clear_user_token_rejects_bearer_admin_session_with_no_user():
+    with pytest.raises(service.ValidationError):
+        await service.clear_user_token(_admin(), TokenProvider.GITHUB)
+
+
+async def test_get_user_token_status_unknown_user_id_is_all_false():
+    assert await service.get_user_token_status(999999) == {
+        "github_token_set": False,
+        "huggingface_token_set": False,
+    }

@@ -13,8 +13,9 @@ from typing import Any
 
 import asyncpg
 
-from . import external_refs
+from . import external_refs, token_crypto
 from .auth import AuthError, generate_key, hash_key
+from .config import settings
 from .constants import (
     CANCELLABLE_RUN_STATUSES,
     DEFAULT_EXPERIMENT_ORDER,
@@ -40,6 +41,7 @@ from .constants import (
     MetricOp,
     RunStatus,
     Scope,
+    TokenProvider,
 )
 from .db import get_pool
 from .markdown_render import render as render_writeup_html
@@ -827,19 +829,29 @@ async def get_artifact(artifact_id: int) -> Artifact:
     return Artifact.model_validate(dict(row))
 
 
-async def verify_artifact(artifact_id: int) -> Artifact:
+async def verify_artifact(artifact_id: int, requesting_user_id: int | None = None) -> Artifact:
     """Live-check that a git+/hf:// reference artifact still actually
     resolves — not just well-formed, actually there (see external_refs.py's
     module docstring for why "exists by name" isn't good enough). Writes
     verify_status/verified_at so the result is cached, not re-checked on
-    every read (GitHub's unauthenticated API is 60 req/hr)."""
+    every read (GitHub's unauthenticated API is 60 req/hr).
+
+    requesting_user_id (the calling bearer key's created_by_user_id, from
+    rest.py) picks whose GitHub/HF token to use, preferring that user's own
+    stored token over the server-wide settings.github_token/huggingface_token
+    fallback — a single shared token is the wrong fix for a rate limit that
+    should be per-person, not per-server."""
     artifact = await get_artifact(artifact_id)
     if artifact.uri.startswith(GIT_URI_PREFIXES):
         host, owner, repo, commit = external_refs.parse_git_uri(artifact.uri)
-        result = await external_refs.verify_git_ref(host, owner, repo, commit)
+        token = await get_user_token(requesting_user_id, TokenProvider.GITHUB) or settings.github_token
+        result = await external_refs.verify_git_ref(host, owner, repo, commit, token)
     elif artifact.uri.startswith(HF_URI_PREFIX):
         repo_type, repo_id, revision = external_refs.parse_hf_uri(artifact.uri)
-        result = await external_refs.verify_hf_ref(repo_type, repo_id, revision, artifact.bytes)
+        token = (
+            await get_user_token(requesting_user_id, TokenProvider.HUGGINGFACE) or settings.huggingface_token
+        )
+        result = await external_refs.verify_hf_ref(repo_type, repo_id, revision, artifact.bytes, token)
     else:
         raise ValidationError(
             f"Artifact {artifact_id} isn't a git+/hf:// reference (uri: {artifact.uri!r}) — "
@@ -1135,3 +1147,65 @@ async def revoke_api_key(caller: DashboardIdentity, key_id: int) -> None:
         )
     if row is None:
         raise NotFoundError(f"No api key with id {key_id}")
+
+
+# ---------------------------------------------------------------------------
+# Per-user GitHub/HF tokens (external artifact verification)
+# ---------------------------------------------------------------------------
+# Human/dashboard-only, same as key self-service — no MCP tool wraps these,
+# same reasoning as create_api_key having none: this is a one-time personal
+# setup action, not something an agent should be doing on a user's behalf.
+
+_TOKEN_COLUMN: dict[TokenProvider, str] = {
+    TokenProvider.GITHUB: "github_token_encrypted",
+    TokenProvider.HUGGINGFACE: "huggingface_token_encrypted",
+}
+
+
+async def set_user_token(caller: DashboardIdentity, provider: TokenProvider, raw_token: str) -> None:
+    if caller.user_id is None:
+        raise ValidationError(
+            "Personal tokens require a signed-in dashboard user, not a bearer-admin session."
+        )
+    if not settings.token_encryption_configured:
+        raise ValidationError("TOKEN_ENCRYPTION_KEY is not configured on this server.")
+    encrypted = token_crypto.encrypt_token(raw_token)
+    pool = await get_pool()
+    column = _TOKEN_COLUMN[provider]
+    await pool.execute(f"UPDATE app_user SET {column} = $1 WHERE id = $2", encrypted, caller.user_id)  # noqa: S608 - column is a fixed enum-keyed lookup, never caller input
+
+
+async def clear_user_token(caller: DashboardIdentity, provider: TokenProvider) -> None:
+    if caller.user_id is None:
+        raise ValidationError(
+            "Personal tokens require a signed-in dashboard user, not a bearer-admin session."
+        )
+    pool = await get_pool()
+    column = _TOKEN_COLUMN[provider]
+    await pool.execute(f"UPDATE app_user SET {column} = NULL WHERE id = $1", caller.user_id)  # noqa: S608 - column is a fixed enum-keyed lookup, never caller input
+
+
+async def get_user_token_status(user_id: int | None) -> dict[str, bool]:
+    if user_id is None:
+        return {"github_token_set": False, "huggingface_token_set": False}
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT github_token_encrypted, huggingface_token_encrypted FROM app_user WHERE id = $1", user_id
+    )
+    if row is None:
+        return {"github_token_set": False, "huggingface_token_set": False}
+    return {
+        "github_token_set": row["github_token_encrypted"] is not None,
+        "huggingface_token_set": row["huggingface_token_encrypted"] is not None,
+    }
+
+
+async def get_user_token(user_id: int | None, provider: TokenProvider) -> str | None:
+    """Only used by verify_artifact's token resolution — never exposed over
+    REST, unlike get_user_token_status."""
+    if user_id is None:
+        return None
+    pool = await get_pool()
+    column = _TOKEN_COLUMN[provider]
+    encrypted = await pool.fetchval(f"SELECT {column} FROM app_user WHERE id = $1", user_id)  # noqa: S608 - column is a fixed enum-keyed lookup, never caller input
+    return token_crypto.decrypt_token(encrypted) if encrypted else None

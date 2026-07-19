@@ -7,7 +7,6 @@ happens in the suite."""
 import pytest
 
 from chuk_experiments_server import external_refs
-from chuk_experiments_server.config import settings
 
 
 class _FakeResponse:
@@ -132,11 +131,16 @@ async def test_verify_git_ref_unverifiable_for_non_github_host_makes_no_request(
     assert fake_client_cls.calls == []
 
 
-async def test_verify_git_ref_sends_token_as_bearer_header_when_configured(monkeypatch):
-    monkeypatch.setattr(type(settings), "github_token", property(lambda self: "gh-secret"))
+async def test_verify_git_ref_sends_token_as_bearer_header_when_given(monkeypatch):
+    fake_client_cls = _install_fake_client(monkeypatch, _FakeResponse(200))
+    await external_refs.verify_git_ref("github.com", "chrishayuk", "chuk-mlx", "abc123", token="gh-secret")
+    assert fake_client_cls.calls[0]["headers"]["Authorization"] == "Bearer gh-secret"
+
+
+async def test_verify_git_ref_omits_auth_header_when_no_token(monkeypatch):
     fake_client_cls = _install_fake_client(monkeypatch, _FakeResponse(200))
     await external_refs.verify_git_ref("github.com", "chrishayuk", "chuk-mlx", "abc123")
-    assert fake_client_cls.calls[0]["headers"]["Authorization"] == "Bearer gh-secret"
+    assert "Authorization" not in fake_client_cls.calls[0]["headers"]
 
 
 async def test_verify_git_ref_unverifiable_on_unexpected_status(monkeypatch):
@@ -195,10 +199,9 @@ async def test_verify_hf_ref_unverifiable_on_non_json_response(monkeypatch):
     assert result.status == "unverifiable"
 
 
-async def test_verify_hf_ref_sends_token_as_bearer_header_when_configured(monkeypatch):
-    monkeypatch.setattr(type(settings), "huggingface_token", property(lambda self: "hf-secret"))
+async def test_verify_hf_ref_sends_token_as_bearer_header_when_given(monkeypatch):
     fake_client_cls = _install_fake_client(monkeypatch, _FakeResponse(200, []))
-    await external_refs.verify_hf_ref("model", "chrishayuk/some-model", "main", None)
+    await external_refs.verify_hf_ref("model", "chrishayuk/some-model", "main", None, token="hf-secret")
     assert fake_client_cls.calls[0]["headers"]["Authorization"] == "Bearer hf-secret"
 
 

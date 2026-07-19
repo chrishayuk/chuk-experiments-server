@@ -40,6 +40,10 @@ dependencies = [
     # already present transitively, declared explicitly rather than relied
     # on implicitly.
     "python-multipart>=0.0.9",
+    # token_crypto.py's Fernet encryption for per-user GitHub/HF tokens —
+    # already present transitively (google-auth depends on it), declared
+    # explicitly since the running server now imports it directly too.
+    "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]

@@ -79,6 +79,14 @@ class ArtifactRole(str, Enum):
     USED = "used"
 
 
+class TokenProvider(str, Enum):
+    """Which external service a per-user token (app_user.*_token_encrypted)
+    is for — see token_crypto.py and service.set_user_token/get_user_token."""
+
+    GITHUB = "github"
+    HUGGINGFACE = "huggingface"
+
+
 class MetricOp(str, Enum):
     """search_experiments' metric predicate operator — a closed whitelist so
     the SQL comparison operator is never built from raw user input."""

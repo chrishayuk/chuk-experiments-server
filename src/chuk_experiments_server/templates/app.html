@@ -420,14 +420,14 @@ async function loadRunDetail(id){
       const short=String(meta.git_commit).slice(0,10);
       const url=`https://github.com/${meta.git_repo}/commit/${meta.git_commit}`;
       const path=`<a href="${esc(url)}" target="_blank" rel="noopener" class="mono">${esc(meta.git_repo)}@${esc(short)}</a><br>${verifyBadge(a)}`;
-      return `<tr><td>${esc(a.kind)}</td><td>${nameCell}</td><td><span class="chip git">git</span></td><td class="muted">${path}</td><td><button data-verify-artifact="${a.id}">Re-verify</button></td></tr>`;
+      return `<tr><td>${esc(a.kind)}</td><td>${nameCell}</td><td><span class="chip git">git</span></td><td class="muted">${path}</td><td class="muted">via verify_artifact</td></tr>`;
     }
     if(meta.hf_repo_id){
       const revision=meta.hf_revision||"main";
       const segment=meta.hf_repo_type==="dataset"?"datasets/":"";
       const url=`https://huggingface.co/${segment}${meta.hf_repo_id}/tree/${revision}`;
       const path=`<a href="${esc(url)}" target="_blank" rel="noopener" class="mono">${esc(meta.hf_repo_id)}@${esc(revision)}</a><br>${verifyBadge(a)}`;
-      return `<tr><td>${esc(a.kind)}</td><td>${nameCell}</td><td><span class="chip hf">HF Hub</span></td><td class="muted">${path}</td><td><button data-verify-artifact="${a.id}">Re-verify</button></td></tr>`;
+      return `<tr><td>${esc(a.kind)}</td><td>${nameCell}</td><td><span class="chip hf">HF Hub</span></td><td class="muted">${path}</td><td class="muted">via verify_artifact</td></tr>`;
     }
     if(String(a.uri||"").startsWith("gdrive://")){
       const path=meta.source_path||a.uri;
@@ -459,15 +459,6 @@ async function loadRunDetail(id){
     ${hasConfig?`<div class="card"><strong>Config</strong>${renderKV(run.config)}</div>`:""}
     ${hasWorkspec?`<div class="card"><strong>Workspec</strong>${renderKV(run.workspec)}</div>`:""}
   `;
-
-  $("#app").addEventListener("click",async ev=>{
-    const artifactId=ev.target.dataset.verifyArtifact;
-    if(!artifactId)return;
-    const btn=ev.target,original=btn.textContent;
-    btn.disabled=true;btn.textContent="Checking…";
-    try{await api(`/v1/artifacts/${artifactId}/verify`,{method:"POST"});loadRunDetail(id);}
-    catch(e){btn.disabled=false;btn.textContent=original;}
-  });
 }
 
 /* ---------------- search ---------------- */
@@ -589,6 +580,30 @@ async function loadTeam(){
     </div>
 
     <div class="card">
+      <div class="hd"><h3>My tokens</h3></div>
+      <p class="muted">Used only for your own <span class="mono">verify_artifact</span> calls
+        (git+/hf:// reference checks) — never shown again after saving, never shared with
+        other users.</p>
+      <table>
+        <tr><td>GitHub</td>
+          <td>${me.github_token_set?'<span class="st good">set</span>':'<span class="st mut">not set</span>'}</td>
+          <td><form class="filters" data-token-form="github">
+            <input type="password" name="token" placeholder="ghp_..." required>
+            <button type="submit">Save</button>
+            ${me.github_token_set?'<button type="button" data-clear-token="github">Clear</button>':""}
+          </form></td></tr>
+        <tr><td>Hugging Face</td>
+          <td>${me.huggingface_token_set?'<span class="st good">set</span>':'<span class="st mut">not set</span>'}</td>
+          <td><form class="filters" data-token-form="huggingface">
+            <input type="password" name="token" placeholder="hf_..." required>
+            <button type="submit">Save</button>
+            ${me.huggingface_token_set?'<button type="button" data-clear-token="huggingface">Clear</button>':""}
+          </form></td></tr>
+      </table>
+      <div id="token-status"></div>
+    </div>
+
+    <div class="card">
       <div class="hd"><h3>New API key</h3></div>
       <form class="filters" id="new-key-form">
         <input type="text" name="name" placeholder="key name" required>
@@ -638,6 +653,17 @@ async function loadTeam(){
     }catch(e){box.innerHTML=`<p class="err">${esc(e.message)}</p>`;}
   });
 
+  document.querySelectorAll("[data-token-form]").forEach(form=>{
+    form.addEventListener("submit",async ev=>{
+      ev.preventDefault();
+      const provider=form.dataset.tokenForm;
+      const token=new FormData(form).get("token");
+      const box=$("#token-status");
+      try{await api(`/v1/me/tokens/${provider}`,{method:"PUT",body:JSON.stringify({token})});loadTeam();}
+      catch(e){box.innerHTML=`<p class="err">${esc(e.message)}</p>`;}
+    });
+  });
+
   if(isAdmin){
     $("#add-user-form").addEventListener("submit",async ev=>{
       ev.preventDefault();
@@ -652,9 +678,11 @@ async function loadTeam(){
   $("#app").addEventListener("click",async ev=>{
     const keyId=ev.target.dataset.revokeKey;
     const userId=ev.target.dataset.revokeUser;
+    const clearToken=ev.target.dataset.clearToken;
     const copyTarget=ev.target.dataset.copyTarget;
     if(keyId){await api("/v1/keys/"+keyId,{method:"DELETE"});loadTeam();}
     else if(userId){await api("/v1/users/"+userId,{method:"DELETE"});loadTeam();}
+    else if(clearToken){await api(`/v1/me/tokens/${clearToken}`,{method:"DELETE"});loadTeam();}
     else if(copyTarget){
       const btn=ev.target,original=btn.textContent;
       await navigator.clipboard.writeText($(copyTarget).textContent);

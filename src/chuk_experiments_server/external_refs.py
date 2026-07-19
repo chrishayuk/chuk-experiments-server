@@ -22,7 +22,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from .config import settings
 from .constants import GIT_URI_PREFIXES, HF_URI_PREFIX
 
 VerifyStatus = Literal["verified", "missing", "unverifiable"]
@@ -74,12 +73,14 @@ def parse_hf_uri(uri: str) -> tuple[str, str, str]:
     return repo_type, repo_id, revision
 
 
-async def verify_git_ref(host: str, owner: str, repo: str, commit: str) -> VerifyResult:
+async def verify_git_ref(
+    host: str, owner: str, repo: str, commit: str, token: str | None = None
+) -> VerifyResult:
     if host != "github.com":
         return VerifyResult("unverifiable", f"only github.com git hosts are checked today, got {host!r}")
     headers = {"Accept": "application/vnd.github+json"}
-    if settings.github_token:
-        headers["Authorization"] = f"Bearer {settings.github_token}"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -96,13 +97,13 @@ async def verify_git_ref(host: str, owner: str, repo: str, commit: str) -> Verif
 
 
 async def verify_hf_ref(
-    repo_type: str, repo_id: str, revision: str, expected_bytes: int | None
+    repo_type: str, repo_id: str, revision: str, expected_bytes: int | None, token: str | None = None
 ) -> VerifyResult:
     segment = "datasets" if repo_type == "dataset" else "models"
     url = f"https://huggingface.co/api/{segment}/{repo_id}/tree/{revision}?recursive=true"
     headers = {}
-    if settings.huggingface_token:
-        headers["Authorization"] = f"Bearer {settings.huggingface_token}"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, headers=headers)

@@ -132,11 +132,15 @@ class Settings:
         )
 
     # --- External artifact reference verification (external_refs.py) --------
-    # Both optional: unauthenticated GitHub API access is 60 req/hr, which a
-    # personal access token (no scopes needed, just raises the rate limit)
-    # bumps to 5000/hr; unset works fine, just rate-limited. Hugging Face's
-    # public repo tree API needs no auth at all for public repos — this is
-    # only for verifying private ones.
+    # Both optional, and both a *fallback* only — service.verify_artifact
+    # prefers the requesting user's own stored token (see below) and only
+    # falls back to these server-wide env vars for keys with no owning user
+    # (bootstrap/CI keys) or users who haven't set a personal one yet.
+    # Unauthenticated GitHub API access is 60 req/hr, which a personal access
+    # token (no scopes needed, just raises the rate limit) bumps to 5000/hr;
+    # unset works fine, just rate-limited. Hugging Face's public repo tree
+    # API needs no auth at all for public repos — this is only for verifying
+    # private ones.
 
     @property
     def github_token(self) -> str | None:
@@ -145,6 +149,22 @@ class Settings:
     @property
     def huggingface_token(self) -> str | None:
         return os.environ.get("HUGGINGFACE_TOKEN")
+
+    # --- Per-user token encryption (token_crypto.py) -------------------------
+    # A Fernet key (Fernet.generate_key(), base64 urlsafe) used to encrypt
+    # app_user.github_token_encrypted/huggingface_token_encrypted at rest —
+    # the first reversible secret this schema stores (api_key only ever
+    # stores a one-way hash). Optional like everything else here: unset means
+    # set_user_token refuses with a clear "not configured" error rather than
+    # storing anything insecurely.
+
+    @property
+    def token_encryption_key(self) -> str | None:
+        return os.environ.get("TOKEN_ENCRYPTION_KEY")
+
+    @property
+    def token_encryption_configured(self) -> bool:
+        return bool(self.token_encryption_key)
 
     # --- Internal API access (tools.py) --------------------------------------
     # MCP tools call this server's own REST API over HTTP rather than

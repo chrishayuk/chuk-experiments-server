@@ -68,7 +68,7 @@ async def authenticate(raw_token: str | None) -> ApiKey | None:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, name, scopes FROM api_key
+        SELECT id, name, scopes, created_by_user_id FROM api_key
         WHERE key_hash = $1 AND revoked_at IS NULL
         """,
         hash_key(raw_token),

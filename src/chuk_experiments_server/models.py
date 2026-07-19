@@ -413,6 +413,10 @@ class ApiKey(RecordModel):
     id: int
     name: str
     scopes: list[Scope]
+    #: NULL for CLI/bootstrap-created keys with no human user behind them
+    #: (e.g. dev-local-key) — see service.verify_artifact's token-resolution
+    #: fallback for what happens when this is None.
+    created_by_user_id: int | None = None
 
     def has_scope(self, scope: Scope) -> bool:
         return scope in self.scopes or Scope.ADMIN in self.scopes
@@ -463,6 +467,14 @@ class ApiKeyCreateResponse(RecordModel):
     scopes: list[Scope]
     created_at: datetime
     raw_key: str
+
+
+class UserTokenSet(BaseModel):
+    """Body for PUT /v1/me/tokens/{provider} — never round-tripped back
+    (see service.get_user_token_status, which only ever reports set/not-set
+    booleans, never the value)."""
+
+    token: str
 
 
 class DashboardIdentity(BaseModel):

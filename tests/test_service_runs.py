@@ -235,3 +235,44 @@ async def test_find_checkpoints_filters_by_model_and_kind():
 
     wrong_model = await service.find_checkpoints(model="v12")
     assert wrong_model == []
+
+
+async def test_verify_artifact_prefers_requesting_users_own_token(monkeypatch):
+    """verify_artifact must resolve the *requesting user's* stored token,
+    not just whatever settings.github_token happens to be — a shared
+    server-wide token defeats the whole point of per-user tokens."""
+    from cryptography.fernet import Fernet
+
+    from chuk_experiments_server import external_refs
+    from chuk_experiments_server.config import settings
+    from chuk_experiments_server.constants import Scope, TokenProvider
+    from chuk_experiments_server.models import DashboardIdentity
+
+    fixed_key = Fernet.generate_key().decode("utf-8")
+    monkeypatch.setattr(type(settings), "token_encryption_key", property(lambda self: fixed_key))
+    monkeypatch.setattr(type(settings), "github_token", property(lambda self: "server-wide-token"))
+
+    user = await service.create_user("verifyuser@example.com", Scope.WRITE)
+    identity = DashboardIdentity(email=user.email, role=user.role, user_id=user.id)
+    await service.set_user_token(identity, TokenProvider.GITHUB, "personal-token")
+
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact = await service.register_artifact(
+        run.id, ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123")
+    )
+
+    seen_tokens = []
+
+    async def _fake_verify_git_ref(host, owner, repo, commit, token=None):
+        seen_tokens.append(token)
+        return external_refs.VerifyResult("verified", "ok")
+
+    monkeypatch.setattr(external_refs, "verify_git_ref", _fake_verify_git_ref)
+
+    await service.verify_artifact(artifact.id, requesting_user_id=user.id)
+    assert seen_tokens == ["personal-token"]
+
+    seen_tokens.clear()
+    await service.verify_artifact(artifact.id, requesting_user_id=None)
+    assert seen_tokens == ["server-wide-token"]
