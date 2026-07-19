@@ -170,8 +170,69 @@ decisions made along the way that the spec didn't originally cover.
   left untouched (2 with no recorded sha256 to verify against, 3 older
   superseded revisions with no commit to honestly point at). This was a
   narrow heuristic sweep (artifacts named like harness/script files) over
-  a small slice of the 241 total, not a real audit — see item 5 below for
-  the actual full sweep, not yet done.
+  a small slice of the 241 total, not a real audit.
+- **Full artifact sweep + broader repo coverage + real HF verification**
+  (2026-07-19, closes the item above) — `scripts/audit_artifacts_for_git_refs.py`
+  extended from 9 to 58 known local repos (every git repo under
+  `~/chris-source` with a real `github.com/chrishayuk` remote; third-party
+  clones like `mlx`/`llama.cpp` deliberately excluded), and HF
+  checkpoint/dataset candidates now get a real file-list-and-size diff
+  against the HF Hub tree API instead of stopping at name-matching. Found
+  3 more verified git+ candidates in `v-tokenizers`, a repo not previously
+  covered — 0 HF checkpoint matches this pass (the remaining artifacts
+  don't fuzzy-match any published `chrishayuk/*` HF repo by name). 26+3=29
+  of 244 total production artifacts now on `git+`/`hf://` references; the
+  other ~215 are genuinely local-only research data (checkpoints/logs/
+  results never checked into any git repo), correctly left untouched.
+- **Dashboard-wide "External refs" screen + MCP tool** (2026-07-19) — new
+  `GET /v1/artifacts/external-refs` (+ `list_external_ref_artifacts` MCP
+  tool) joins artifact → run → experiment filtered to `git+`/`hf://` uris;
+  new `#/external-refs` dashboard screen shows every reference across all
+  experiments with the same chip+link+verify-badge rendering as run-detail
+  (factored into a shared `externalRefCell` JS helper), plus a per-page
+  verified/missing/unverifiable/never-checked count. Previously a
+  reference only ever rendered specially on the one run-detail page it
+  belonged to — no way to browse "every git/HF reference, and which have
+  gone stale" without opening runs one at a time.
+- **Per-user GitHub/HF tokens** (2026-07-19) — `app_user` gets
+  `github_token_encrypted`/`huggingface_token_encrypted` (Fernet, the first
+  reversible secret this schema stores — `api_key` only ever stores a
+  one-way hash), managed from a new "My tokens" card on the Team screen
+  (`PUT`/`DELETE /v1/me/tokens/{provider}`, gated by `require_dashboard_role`
+  the same way key self-service is — any signed-in user manages their own,
+  no elevated role needed). `verify_artifact` now resolves the *calling
+  bearer key's owning user* (`api_key.created_by_user_id`, newly exposed on
+  the `ApiKey` model) and prefers that user's personal token over the
+  server-wide `settings.github_token`/`huggingface_token` fallback, which
+  still covers bootstrap/CI keys with no owning user. Directly motivated by
+  hitting Fly's shared-egress-IP GitHub rate limit earlier the same day.
+  Real bug caught and fixed along the way: the dashboard's "Re-verify"
+  button (shipped earlier the same day) could never have worked from a
+  real browser session — a cookie-only session only ever satisfies READ
+  scope by design, and the SPA never attached a bearer token — so it was
+  removed; the verify badge itself (a plain READ) still renders fine, and
+  a fresh check now goes through `verify_artifact` (MCP tool or direct API
+  call) instead.
+- **Content-addressed dedup/lineage extended to git+/hf:// artifacts**
+  (2026-07-19) — these never carry a `sha256` (the commit/revision in the
+  `uri` itself is the content address), so registering the same `(name,
+  uri)` twice previously just created two independent `produced` rows with
+  no lineage link, unlike byte-uploads which dedup via `(name, sha256)`.
+  New partial unique index (`WHERE sha256 IS NULL`) mirrors the existing
+  one exactly, triggering the same catch-and-retry-as-`used` path
+  `register_artifact` already had. `get_artifact_lineage` groups by
+  `(name, uri)` instead when `sha256` is absent — no UI change needed,
+  since the run-detail artifacts table already fetches lineage for any
+  named artifact regardless of scheme. Pinning needed no change at all —
+  `set_pin`/`get_pin` were already scheme-agnostic.
+- **Clearer create_experiment/append_writeup docstrings** (2026-07-19) —
+  real case: TOK-0's hypothesis field was an inventory of every harness
+  component crammed into one run-on sentence, not a claim, with eight
+  undefined acronyms before any actual idea. The old docstring gave zero
+  signal for this ("hypothesis: What we expect and why" was the entire
+  guidance). Rewrote both docstrings with a concrete bad/good example —
+  the one thing every calling agent actually reads, every time, unlike a
+  skill, which only helps if explicitly invoked.
 
 ## Fixed (found via code review, 2026-07-19)
 
@@ -301,40 +362,23 @@ code before fixing, each verified with a new regression test:
    run lifecycle into this server's `/v1/queue` contract. Explicitly
    sequenced after the dashboard was fully live, which it now is.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
-4. **Full sweep of existing artifacts for git/HF migration candidates** —
-   the 2026-07-19 pass (see "Done" above) only checked 16 of 241 total
-   production artifacts, found by a narrow heuristic (gdrive:// artifacts
-   named like harness/script files). A real sweep means going through all
-   241: for each, does its `name`/`source_path`/content plausibly match a
-   real git commit or an already-published HF repo? — same byte-for-byte
-   verification discipline (sha256 against a real commit; file-list-and-
-   size diff against a real HF revision), not name-matching. Likely
-   surfaces more candidates than the harness-script slice already found
-   (e.g. checkpoints that happen to already be on HF).
-5. **Dashboard-wide visualization for git/HF-referenced artifacts** — today
-   a git/hf artifact only renders specially (chip + link + verify badge)
-   on the specific run-detail page it belongs to, or as a formatted link
-   if it's pinned. There's no aggregate view at all: no way to browse
-   "every artifact referencing a git repo or HF model across all
-   experiments," and no overview-level count of verified vs.
-   missing/unverifiable/never-checked. A dedicated screen (or a filter on
-   the existing Experiments/Search views) would make "which of our
-   external references have gone stale" a glanceable fact instead of
-   something only discoverable by opening runs one at a time.
-6. **Per-user GitHub/HF tokens** (Team screen) — `settings.github_token`/
-   `huggingface_token` today are single server-wide env vars, which forces
-   an awkward choice: leave unset (verify degrades to `unverifiable` under
-   rate limiting) or set one broadly-scoped personal token for everyone.
-   Concretely hit this 2026-07-19: migrating 11 real v12-tokenizer harness
-   artifacts to `git+` references, `verify_artifact` came back
-   `unverifiable` for all of them — not a bug, Fly's *shared* egress IP was
-   already at GitHub's 60/hr unauthenticated limit (confirmed: the same
-   commit checked fine, 51/60 remaining, from a non-Fly IP moments later).
-   The right fix isn't one shared secret; it's each user storing their own
-   token (encrypted at rest, same self-service model as API keys on the
-   Team screen already), used for that user's own `verify_artifact` calls
-   — narrower blast radius than a single broadly-scoped org-wide token,
-   and no Fly secret/redeploy needed to rotate or add one.
+4. **Systematic hypothesis/write-up quality review across all experiments**
+   (in progress, 2026-07-19) — 335 of 369 experiments have a hypothesis,
+   198 write-ups across 189 experiments; the TOK-0 jargon-dump case that
+   motivated the docstring fix (see "Done" above) is very unlikely to be
+   the only one. Multi-agent workflow reviews each in batches, proposes a
+   faithful rewrite (preserving the exact original claim/every factual
+   finding) where needed, then adversarially verifies each proposal before
+   anything is ever applied to production — a full database backup was
+   taken first specifically because this pass, unlike the byte-verified
+   artifact migration, involves real content judgment, not a mechanical
+   hash match. First full attempt (37 batches) mostly failed: embedding
+   the raw production DB credential directly in each of 37 agent prompts
+   tripped a safety classifier on ~40% of them, and fragile nested-quote
+   shell commands left most of the rest returning empty results — fixed by
+   having each agent derive its own DB connection string at runtime
+   (`npx neonctl connection-string`, never pasted into a prompt) and write
+   a real script file instead of an inline multi-quoted one-liner.
 
 ## New features under consideration (2026-07-19)
 

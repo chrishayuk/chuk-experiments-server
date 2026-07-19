@@ -67,6 +67,11 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   changing. Every pin is browsable on the dashboard's **Pins** screen, and
   a pinned artifact shows a "pinned as ..." badge inline on its run's
   detail page.
+- **External refs screen.** Every `git+`/`hf://` artifact across every
+  experiment is browsable in one place (`#/external-refs`) — reference,
+  verify status, and last-checked time, so "which checkpoints are actually
+  still resolvable on GitHub/HF" is a single screen instead of digging
+  through individual runs.
 - **Queue and lease runs for a training harness.** A harness can peek the
   queue, atomically claim a batch (`FOR UPDATE SKIP LOCKED`, greedy
   bin-packing by priority/estimated seconds), respect dependency ordering
@@ -80,7 +85,10 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   user can self-service generate/revoke their own MCP API keys from the
   **Team** screen, scoped to their role's ceiling (read/write/admin); admins
   can add or revoke collaborators. No more shelling into the server just to
-  mint a key.
+  mint a key. The same screen lets each user set their own personal
+  GitHub/Hugging Face token (encrypted at rest, never echoed back) so
+  `verify_artifact` calls made under their key use their own rate limit
+  instead of one shared server-wide token.
 - **One process, two protocols.** Built on
   [chuk-mcp-server](https://github.com/chuk-mcp): REST endpoints
   (`@mcp.endpoint`) and MCP tools (`@mcp.tool`) live on the same
