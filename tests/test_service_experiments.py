@@ -161,6 +161,16 @@ async def test_get_index_includes_headline_metric():
     assert index[0].headline_metric.value == 0.72
 
 
+async def test_get_index_respects_limit_and_offset():
+    for i in range(3):
+        await service.create_experiment(_experiment_create(slug=f"cn-{i}"))
+
+    first_page = await service.get_index(limit=2)
+    second_page = await service.get_index(limit=2, offset=2)
+    assert len(first_page) == 2
+    assert len(second_page) == 1
+
+
 def _run_create(**overrides):
     from chuk_experiments_server.models import RunCreate
 

@@ -130,39 +130,61 @@ decisions made along the way that the spec didn't originally cover.
   there was previously no in-app guidance on how to actually connect an
   MCP client at all.
 
-## Known issues (found via code review, 2026-07-19)
+## Fixed (found via code review, 2026-07-19)
 
 A review of `src/chuk_experiments_server/` (not the SPA, migrations, or
 scripts) turned up 7 concrete issues, all confirmed against the actual
-code, none needing a design call — fixing all of them next:
+code before fixing, each verified with a new regression test:
 
 1. **Open redirect via `meta.drive_url`** (`rest.py`) — a WRITE-scoped
-   caller can set `meta.drive_url` to an arbitrary URL (spread after the
-   computed value in `_upload_or_dedup_artifact`; never validated at all
-   on the plain `register_artifact` path). `artifact_download` then
-   302-redirects there unconditionally — an open-redirect/phishing vector
-   for anyone who opens a download link.
+   caller could set `meta.drive_url` to an arbitrary URL, and
+   `artifact_download` followed it unconditionally. Fixed two ways: the
+   computed value now always wins over caller `meta` on the upload/dedup
+   path, and `artifact_download` additionally validates `drive_url`
+   against `TRUSTED_DRIVE_URL_PREFIX` before ever redirecting — needed
+   because plain `register_artifact` still allows arbitrary `meta` by
+   design (e.g. linking a checkpoint with another project's own metadata
+   shape), so validation has to happen at redirect time regardless of who
+   wrote it.
 2. **Admin-revocation race** (`service.py:revoke_user`) — the "don't
-   revoke the last admin" guard is check-then-act with no row lock; two
-   concurrent revokes of two different admins can both pass the count
-   check and leave zero active admins.
-3. **Dedup race breaks lineage** (`service.py`) — `find_artifact_by_name_sha`
-   + insert is check-then-act with no unique constraint; two simultaneous
-   uploads of identical `(name, sha256)` can both miss the dedup hit and
-   both insert `role='produced'`, and `get_artifact_lineage`'s `next(...)`
-   silently drops one of them from lineage entirely.
+   revoke the last admin" guard was check-then-act with no row lock.
+   Fixed with `SELECT ... FOR UPDATE` over every active admin row before
+   counting (Postgres rejects `FOR UPDATE` combined with an aggregate, so
+   the count happens in Python over the locked rows) — a concurrent
+   revoke of a different admin now blocks on the lock instead of racing a
+   stale count.
+3. **Dedup race breaks lineage** (`service.py`) — two simultaneous
+   uploads of identical `(name, sha256)` could both miss the dedup hit
+   and both insert `role='produced'`, silently dropping one from
+   `get_artifact_lineage`. Fixed with a partial unique index
+   (`migrations/005_artifact_produced_unique.sql`,
+   `(name, sha256) WHERE role='produced' AND name IS NOT NULL`) —
+   `register_artifact` catches the resulting `UniqueViolationError` and
+   falls back to registering as `role='used'` instead of erroring,
+   exactly what the dedup check would have found had it run a moment
+   later.
 4. **Unescaped Drive API query injection** (`drive_storage.py:ensure_folder`)
-   — artifact `name` is interpolated directly into a Drive query string
-   with no escaping; a `'` in the name breaks or reshapes the query.
+   — artifact `name` was interpolated directly into a Drive query string.
+   Fixed with `_escape_drive_query_value`, backslash-escaping `\` and `'`
+   per Drive's documented query-string convention.
 5. **`limit` params unbounded, bad input → 500 not 400** — `MAX_LIST_LIMIT`
-   is defined but referenced nowhere; `?limit=abc` raises an uncaught
-   `ValueError` that falls through to a generic 500 instead of a 400.
-6. **No exception logging anywhere** — `_with_error_handling`/`errors.py`
-   map every unmapped exception to `{"error": "internal_error"}` with zero
-   `logger.exception(...)` — real bugs vanish without a trace in
-   production.
+   was defined but referenced nowhere, and `?limit=abc` raised an
+   uncaught `ValueError`. Fixed with shared `_parse_limit`/`_parse_offset`
+   helpers — non-numeric or negative input is now a 422, and anything
+   over `MAX_LIST_LIMIT` is silently clamped rather than driving an
+   unbounded query.
+6. **No exception logging anywhere** — `_with_error_handling` mapped
+   every unmapped exception straight to `{"error": "internal_error"}`
+   with no `logger.exception(...)`. Fixed by logging (with full
+   traceback) specifically when `error_payload` falls through to
+   `INTERNAL_SERVER_ERROR` — the expected-control-flow cases
+   (`NotFoundError`/`ConflictError`/etc., which already carry their own
+   4xx status) stay unlogged, so this doesn't turn into log spam.
 7. **`get_index()` has no pagination** — full table scan + a correlated
    subquery per row, unbounded, on the tool documented as "most-used."
+   Fixed with `limit`/`offset` (default `MAX_LIST_LIMIT`, so today's
+   dataset size sees no behavior change) on both the service function and
+   `GET /v1/index`.
 
 ## Next
 

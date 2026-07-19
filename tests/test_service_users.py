@@ -1,6 +1,7 @@
 """service.py's users/API-key self-service functions — direct calls, no HTTP
 layer (that's test_rest.py's job for the auth-gating half)."""
 
+import asyncio
 from http import HTTPStatus
 
 import pytest
@@ -67,6 +68,37 @@ async def test_revoke_user_allows_revoking_an_admin_when_another_remains():
     second_admin = await service.create_user("second-admin@example.com", Scope.ADMIN)
     await service.revoke_user(second_admin.id)
     assert await service.get_active_user_by_email("second-admin@example.com") is None
+
+
+async def test_revoke_user_concurrent_last_two_admins_only_one_succeeds():
+    """Two concurrent revoke_user calls against the only two active admins
+    must not both pass the last-admin check — exactly one should succeed,
+    the other should see the (by-then) last remaining admin and refuse.
+    Verifies the end invariant (never zero active admins); asyncpg's real
+    connections against local Postgres are fast enough that this doesn't
+    reliably force the two transactions to overlap inside the same
+    contention window the FOR UPDATE lock actually guards — it passed even
+    against the pre-fix check-then-act code in manual testing. The FOR
+    UPDATE fix itself is standard, timing-independent Postgres locking
+    semantics; this test is a coarse correctness check, not proof the race
+    was hit."""
+    users = await service.list_team_users()
+    first_admin = next(u for u in users if u.role == Scope.ADMIN)
+    second_admin = await service.create_user("concurrent-admin@example.com", Scope.ADMIN)
+
+    results = await asyncio.gather(
+        service.revoke_user(first_admin.id),
+        service.revoke_user(second_admin.id),
+        return_exceptions=True,
+    )
+
+    conflicts = [r for r in results if isinstance(r, service.ConflictError)]
+    successes = [r for r in results if r is None]
+    assert len(conflicts) == 1
+    assert len(successes) == 1
+
+    remaining = [u for u in await service.list_team_users() if u.role == Scope.ADMIN and not u.revoked_at]
+    assert len(remaining) == 1
 
 
 async def test_revoke_user_cascades_to_their_api_keys():

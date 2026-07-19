@@ -190,6 +190,14 @@ GDRIVE_URI_PREFIX = "gdrive://"
 #: (large checkpoints) instead — both hand back one of these prefixes.
 VALID_ARTIFACT_URI_PREFIXES = ("s3://", GDRIVE_URI_PREFIX, "https://", "http://")
 
+#: register_artifact accepts arbitrary caller-supplied `meta` (e.g. linking
+#: a checkpoint that already lives in another project's bucket, with that
+#: project's own metadata shape) — but artifact_download follows
+#: meta["drive_url"] with an unconditional redirect, so that one specific
+#: field must be checked against Drive's real domain before ever being
+#: used as a redirect target, regardless of who wrote it.
+TRUSTED_DRIVE_URL_PREFIX = "https://drive.google.com/"
+
 # --- Dashboard auth (spec §8/§9 "website behind ... the read key") -----------
 # "Sign in with Google", restricted to one email — a browser session, not the
 # bearer-token API auth in auth.py (that's for REST/MCP clients, which can

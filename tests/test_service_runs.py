@@ -138,6 +138,35 @@ async def test_get_artifact_lineage_splits_produced_and_used():
     assert lineage.used_by_run_ids == [run_b.id]
 
 
+async def test_register_artifact_produced_race_falls_back_to_used():
+    """Simulates the dedup race directly: two calls both requesting
+    role=produced for the identical (name, sha256), as if two concurrent
+    uploads both missed the dedup hit (rest.py's find_artifact_by_name_sha
+    check-then-register isn't atomic). The second insert must hit
+    idx_artifact_produced_name_sha_unique and gracefully fall back to
+    role=used instead of raising — otherwise get_artifact_lineage would
+    silently drop whichever run lost the race."""
+    await _make_experiment()
+    run_a = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
+
+    first = await service.register_artifact(
+        run_a.id,
+        ArtifactCreate(kind="other", uri="gdrive://a", sha256="deadbeef", name="harness", role="produced"),
+    )
+    second = await service.register_artifact(
+        run_b.id,
+        ArtifactCreate(kind="other", uri="gdrive://b", sha256="deadbeef", name="harness", role="produced"),
+    )
+
+    assert first.role == "produced"
+    assert second.role == "used"
+
+    lineage = await service.get_artifact_lineage(first.id)
+    assert lineage.produced_by_run_id == run_a.id
+    assert lineage.used_by_run_ids == [run_b.id]
+
+
 async def test_get_artifact_lineage_empty_for_unnamed_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))

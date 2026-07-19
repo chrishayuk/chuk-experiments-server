@@ -27,11 +27,13 @@ from .constants import (
     EXPERIMENT_SORT_COLUMNS,
     ID_SEQUENCE_PAD_WIDTH,
     LEASABLE_RUN_STATUSES,
+    MAX_LIST_LIMIT,
     METRIC_OP_SQL,
     ROLE_SCOPE_CEILING,
     RUN_ID_PREFIX,
     RUN_REF_SEQUENCE,
     VALID_ARTIFACT_URI_PREFIXES,
+    ArtifactRole,
     MetricOp,
     RunStatus,
     Scope,
@@ -393,11 +395,14 @@ async def search_experiments(
     return [SearchHit.model_validate(dict(row)) for row in rows]
 
 
-async def get_index() -> list[IndexEntry]:
+async def get_index(limit: int = MAX_LIST_LIMIT, offset: int = 0) -> list[IndexEntry]:
     """The full compact catalogue (spec §5a) — small enough that an agent
     reads the whole thing in one call and does semantic matching itself,
     in-context, rather than relying on FTS alone. Expected to be the
-    most-used read tool."""
+    most-used read tool. `limit` defaults to MAX_LIST_LIMIT rather than
+    DEFAULT_LIST_LIMIT — a bounded full scan, not an unbounded one, but
+    still "the whole catalogue in one call" for any realistic experiment
+    count today."""
     pool = await get_pool()
     rows = await pool.fetch(
         """
@@ -414,7 +419,10 @@ async def get_index() -> list[IndexEntry]:
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
         ORDER BY e.updated_at DESC
-        """
+        LIMIT $1 OFFSET $2
+        """,
+        limit,
+        offset,
     )
     return [IndexEntry.model_validate(dict(row)) for row in rows]
 
@@ -772,21 +780,35 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
     run_exists = await pool.fetchval("SELECT 1 FROM run WHERE id = $1", run_id)
     if not run_exists:
         raise NotFoundError(f"No run with id {run_id}")
-    row = await pool.fetchrow(
-        """
-        INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta, name, role)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
-        """,
-        run_id,
-        data.kind.value,
-        data.uri,
-        data.bytes,
-        data.sha256,
-        data.meta,
-        data.name,
-        data.role.value,
-    )
+
+    async def _insert(role: ArtifactRole) -> Any:
+        return await pool.fetchrow(
+            """
+            INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta, name, role)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
+            """,
+            run_id,
+            data.kind.value,
+            data.uri,
+            data.bytes,
+            data.sha256,
+            data.meta,
+            data.name,
+            role.value,
+        )
+
+    try:
+        row = await _insert(data.role)
+    except asyncpg.UniqueViolationError:
+        # Lost a race to register the same (name, sha256) as PRODUCED —
+        # idx_artifact_produced_name_sha_unique means another concurrent
+        # upload's insert already committed as PRODUCED first. Register
+        # this run's copy as USED instead of erroring, matching what
+        # find_artifact_by_name_sha would have found had it run a moment
+        # later — this is what keeps get_artifact_lineage from silently
+        # dropping either run.
+        row = await _insert(ArtifactRole.USED)
     return Artifact.model_validate(dict(row))
 
 
@@ -982,10 +1004,18 @@ async def revoke_user(user_id: int) -> None:
             raise NotFoundError(f"No active user with id {user_id}")
 
         if target["role"] == Scope.ADMIN.value:
-            remaining_admins = await conn.fetchval(
-                "SELECT count(*) FROM app_user WHERE role = 'admin' AND revoked_at IS NULL AND id != $1",
-                user_id,
+            # FOR UPDATE locks every active admin row for the transaction's
+            # duration — a concurrent revoke_user targeting a *different*
+            # admin blocks here instead of racing this one on a stale
+            # count, which is what let two concurrent revokes both pass
+            # the check and leave zero active admins. (Postgres rejects
+            # FOR UPDATE combined with an aggregate, hence counting the
+            # fetched rows in Python rather than `SELECT count(*) ... FOR
+            # UPDATE`.)
+            admin_rows = await conn.fetch(
+                "SELECT id FROM app_user WHERE role = 'admin' AND revoked_at IS NULL FOR UPDATE"
             )
+            remaining_admins = sum(1 for row in admin_rows if row["id"] != user_id)
             if remaining_admins == 0:
                 raise ConflictError("Cannot revoke the last remaining admin user")
 

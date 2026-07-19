@@ -12,6 +12,7 @@ therefore registered ONCE with `methods=[...]` and dispatch on
 import base64
 import binascii
 import hashlib
+import logging
 from functools import wraps
 from http import HTTPStatus
 from typing import Any, Callable
@@ -27,7 +28,9 @@ from .constants import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_SEARCH_LIMIT,
     GDRIVE_URI_PREFIX,
+    MAX_LIST_LIMIT,
     PRESIGN_PUT_EXPIRY_SECONDS,
+    TRUSTED_DRIVE_URL_PREFIX,
     ArtifactRole,
     Scope,
 )
@@ -52,6 +55,8 @@ from .models import (
 from .serialization import to_jsonable
 from .server import mcp
 
+logger = logging.getLogger(__name__)
+
 _R2_NOT_CONFIGURED = {"error": "not_implemented", "detail": "R2 is not configured on this server"}
 _DRIVE_NOT_CONFIGURED = {
     "error": "not_implemented",
@@ -67,6 +72,34 @@ def _ok(data: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
     return JSONResponse(to_jsonable(data), status_code=status.value)
 
 
+def _parse_limit(raw: str | None, default: int) -> int:
+    """A bad `?limit=` (non-numeric, negative) is a 422, not an uncaught
+    ValueError falling through to a generic 500 — and a huge one is
+    silently clamped to MAX_LIST_LIMIT rather than driving an unbounded
+    query as the table grows."""
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise service.ValidationError(f"limit must be an integer, got '{raw}'") from None
+    if value < 0:
+        raise service.ValidationError(f"limit must be non-negative, got {value}")
+    return min(value, MAX_LIST_LIMIT)
+
+
+def _parse_offset(raw: str | None) -> int:
+    if raw is None:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        raise service.ValidationError(f"offset must be an integer, got '{raw}'") from None
+    if value < 0:
+        raise service.ValidationError(f"offset must be non-negative, got {value}")
+    return value
+
+
 def _with_error_handling(handler: Callable[[Request], Any]) -> Callable[[Request], Any]:
     @wraps(handler)
     async def wrapped(request: Request) -> Response:
@@ -74,6 +107,15 @@ def _with_error_handling(handler: Callable[[Request], Any]) -> Callable[[Request
             return await handler(request)
         except Exception as exc:  # translated uniformly via error_payload
             status, body = error_payload(exc)
+            if status == HTTPStatus.INTERNAL_SERVER_ERROR:
+                # NotFoundError/ConflictError/ValidationError etc. are
+                # expected control flow with their own 4xx status — only an
+                # exception error_payload couldn't map at all is logged
+                # here, since that's the case where the real traceback
+                # would otherwise vanish behind a bare {"error":
+                # "internal_error"} with nothing in the server logs to
+                # debug from.
+                logger.exception("Unhandled exception in %s %s", request.method, request.url.path)
             return JSONResponse(body, status_code=status.value)
 
     return wrapped
@@ -107,8 +149,8 @@ async def experiments_collection(request: Request) -> Response:
             status=params.get("status"),
             tags=params.getlist("tag") or None,
             q=params.get("q"),
-            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
-            offset=int(params.get("offset", 0)),
+            limit=_parse_limit(params.get("limit"), DEFAULT_LIST_LIMIT),
+            offset=_parse_offset(params.get("offset")),
             sort=params.get("sort", DEFAULT_EXPERIMENT_SORT),
             order=params.get("order", DEFAULT_EXPERIMENT_ORDER),
         )
@@ -198,8 +240,8 @@ async def search(request: Request) -> Response:
             metric=metric,
             metric_op=op,
             metric_value=float(value) if value is not None else None,
-            limit=int(params.get("limit", DEFAULT_SEARCH_LIMIT)),
-            offset=int(params.get("offset", 0)),
+            limit=_parse_limit(params.get("limit"), DEFAULT_SEARCH_LIMIT),
+            offset=_parse_offset(params.get("offset")),
         )
     )
 
@@ -208,7 +250,13 @@ async def search(request: Request) -> Response:
 @_with_error_handling
 async def index(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.READ)
-    return _ok(await service.get_index())
+    params = request.query_params
+    return _ok(
+        await service.get_index(
+            limit=_parse_limit(params.get("limit"), MAX_LIST_LIMIT),
+            offset=_parse_offset(params.get("offset")),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +274,7 @@ async def queue_peek(request: Request) -> Response:
         await service.peek_queue(
             backend=params.get("backend"),
             max_seconds=int(max_seconds) if max_seconds is not None else None,
-            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
+            limit=_parse_limit(params.get("limit"), DEFAULT_LIST_LIMIT),
         )
     )
 
@@ -333,7 +381,7 @@ async def artifacts_collection(request: Request) -> Response:
             experiment=params.get("experiment"),
             model=params.get("model"),
             kind=params.get("kind"),
-            limit=int(params.get("limit", DEFAULT_LIST_LIMIT)),
+            limit=_parse_limit(params.get("limit"), DEFAULT_LIST_LIMIT),
         )
     )
 
@@ -386,7 +434,13 @@ async def _upload_or_dedup_artifact(run_id: str, data: ArtifactUploadRequest, co
     existing = await service.find_artifact_by_name_sha(data.name, content_sha256)
     if existing is not None:
         uri = existing.uri
-        meta = {**existing.meta, "source_path": data.filename, **data.meta}
+        # drive_url is pinned to the original upload's value (never the
+        # caller's) — a caller-controlled meta.drive_url would otherwise let
+        # them redirect a future /download to an arbitrary URL, since
+        # artifact_download follows this field unconditionally.
+        meta = {**data.meta, "source_path": data.filename}
+        if "drive_url" in existing.meta:
+            meta["drive_url"] = existing.meta["drive_url"]
         role = data.role or ArtifactRole.USED
     else:
         drive_client = drive_storage.get_client()
@@ -396,7 +450,11 @@ async def _upload_or_dedup_artifact(run_id: str, data: ArtifactUploadRequest, co
         )
         file_id = drive_storage.upload_bytes(drive_client, data.filename, content, parent_id)
         uri = f"{GDRIVE_URI_PREFIX}{file_id}"
-        meta = {"drive_url": drive_storage.drive_url(file_id), "source_path": data.filename, **data.meta}
+        meta = {
+            **data.meta,
+            "drive_url": drive_storage.drive_url(file_id),
+            "source_path": data.filename,
+        }
         role = data.role or ArtifactRole.PRODUCED
 
     artifact_data = ArtifactCreate(
@@ -486,10 +544,16 @@ async def artifact_download(request: Request) -> Response:
         # the folder link is already there in meta (drive.file scope means
         # only the archiving Google account can view it, which is the same
         # account the dashboard's Google sign-in is restricted to).
+        #
+        # register_artifact accepts arbitrary caller-supplied meta, so
+        # drive_url isn't necessarily trustworthy just because it's present
+        # — checked against Drive's real domain before ever being used as a
+        # redirect target, so a crafted meta can't turn this into an open
+        # redirect.
         drive_url = artifact.meta.get("drive_url")
-        if not drive_url:
+        if not drive_url or not drive_url.startswith(TRUSTED_DRIVE_URL_PREFIX):
             return JSONResponse(
-                {"error": "artifact has no drive_url in meta"},
+                {"error": "artifact has no valid drive_url in meta"},
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             )
         return RedirectResponse(drive_url, status_code=HTTPStatus.FOUND.value)

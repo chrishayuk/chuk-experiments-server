@@ -66,11 +66,22 @@ def get_client():
     return _client
 
 
+def _escape_drive_query_value(value: str) -> str:
+    """Drive's query language uses '...' string literals with the same
+    backslash-escaping convention SQL does — a bare `'` in `name` (e.g. an
+    artifact name a caller controls) would otherwise break out of the
+    literal and reshape the query. Escape backslashes first so an
+    escaped-then-escaped quote doesn't collide."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def ensure_folder(service, name: str, parent_id: str | None) -> str:
     """Get-or-create a Drive folder by name under a parent, returning its id."""
-    query = f"name = '{name}' and mimeType = '{_FOLDER_MIME_TYPE}' and trashed = false"
+    query = (
+        f"name = '{_escape_drive_query_value(name)}' and mimeType = '{_FOLDER_MIME_TYPE}' and trashed = false"
+    )
     if parent_id:
-        query += f" and '{parent_id}' in parents"
+        query += f" and '{_escape_drive_query_value(parent_id)}' in parents"
     results = service.files().list(q=query, fields="files(id, name)").execute()
     existing = results.get("files", [])
     if existing:

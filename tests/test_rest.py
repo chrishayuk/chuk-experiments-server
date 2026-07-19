@@ -37,6 +37,27 @@ async def test_programmes_empty_list(api_client, write_key):
     assert resp.json() == []
 
 
+async def test_unmapped_exception_is_logged_before_500(api_client, write_key, monkeypatch, caplog):
+    """An exception error_payload can't map to a specific status must not
+    vanish silently — it's the one case where the real traceback would
+    otherwise never appear anywhere, unlike NotFoundError/ConflictError/
+    etc., which are expected control flow with their own 4xx status."""
+    from chuk_experiments_server import service
+
+    async def _boom():
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(service, "list_programmes", _boom)
+
+    with caplog.at_level("ERROR", logger="chuk_experiments_server.rest"):
+        resp = await api_client.get("/v1/programmes", headers=_auth(write_key))
+
+    assert resp.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert resp.json() == {"error": "internal_error"}
+    assert "kaboom" in caplog.text
+    assert "Unhandled exception" in caplog.text
+
+
 async def test_programmes_accepts_dashboard_session_cookie_with_no_bearer_token(
     api_client, authenticated_cookies
 ):
@@ -122,6 +143,34 @@ async def test_list_experiments_rejects_unknown_sort_column(api_client, write_ke
     assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+async def test_list_experiments_rejects_non_numeric_limit(api_client, write_key):
+    resp = await api_client.get("/v1/experiments", params={"limit": "abc"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_list_experiments_rejects_negative_limit(api_client, write_key):
+    resp = await api_client.get("/v1/experiments", params={"limit": "-1"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_list_experiments_clamps_huge_limit(api_client, write_key):
+    for i in range(3):
+        await _create_experiment(api_client, write_key, slug=f"cn-{i}")
+    resp = await api_client.get("/v1/experiments", params={"limit": "1000000"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    assert len(resp.json()) == 3
+
+
+async def test_list_experiments_rejects_non_numeric_offset(api_client, write_key):
+    resp = await api_client.get("/v1/experiments", params={"offset": "abc"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_list_experiments_rejects_negative_offset(api_client, write_key):
+    resp = await api_client.get("/v1/experiments", params={"offset": "-1"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 async def test_append_writeup(api_client, write_key):
     await _create_experiment(api_client, write_key)
     resp = await api_client.post(
@@ -175,6 +224,23 @@ async def test_index(api_client, write_key):
     resp = await api_client.get("/v1/index", headers=_auth(write_key))
     assert resp.status_code == HTTPStatus.OK
     assert [e["slug"] for e in resp.json()] == ["cn-7"]
+
+
+async def test_index_respects_limit_and_offset(api_client, write_key):
+    for i in range(3):
+        await _create_experiment(api_client, write_key, slug=f"cn-{i}")
+
+    first_page = await api_client.get("/v1/index", params={"limit": 2}, headers=_auth(write_key))
+    second_page = await api_client.get(
+        "/v1/index", params={"limit": 2, "offset": 2}, headers=_auth(write_key)
+    )
+    assert len(first_page.json()) == 2
+    assert len(second_page.json()) == 1
+
+
+async def test_index_rejects_non_numeric_limit(api_client, write_key):
+    resp = await api_client.get("/v1/index", params={"limit": "abc"}, headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 # --- Runs ------------------------------------------------------------------
@@ -384,6 +450,77 @@ async def test_artifacts_upload_dedups_by_name_and_sha(api_client, write_key, mo
     assert second.json()["uri"] == first.json()["uri"]
 
 
+async def test_artifacts_upload_dedup_cannot_override_drive_url(api_client, write_key, monkeypatch):
+    """A dedup hit's drive_url must always come from the original upload,
+    never a later caller's own meta — otherwise the second (or a
+    malicious) call could redirect future downloads anywhere it likes."""
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    monkeypatch.setattr(
+        drive_storage, "upload_bytes", lambda service, filename, content, parent_id: "fake-file-id"
+    )
+
+    await _create_experiment(api_client, write_key)
+    run_a = (await _enqueue_run(api_client, write_key)).json()["id"]
+    run_b_resp = await api_client.post(
+        "/v1/experiments/cn-7/runs", json={"slug": "seed-1"}, headers=_auth(write_key)
+    )
+    run_b = run_b_resp.json()["id"]
+
+    first = await api_client.post(
+        f"/v1/runs/{run_a}/artifacts/upload",
+        json={"filename": "harness.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "harness.py"},
+        headers=_auth(write_key),
+    )
+    second = await api_client.post(
+        f"/v1/runs/{run_b}/artifacts/upload",
+        json={
+            "filename": "harness.py",
+            "kind": "other",
+            "content_base64": "aGVsbG8=",
+            "name": "harness.py",
+            "meta": {"drive_url": "https://evil.example.com/phish"},
+        },
+        headers=_auth(write_key),
+    )
+
+    assert second.status_code == HTTPStatus.CREATED
+    assert second.json()["meta"]["drive_url"] == first.json()["meta"]["drive_url"]
+
+
+async def test_artifacts_upload_dedup_against_plain_pointer_with_no_drive_url(
+    api_client, write_key, monkeypatch
+):
+    """A dedup hit against an artifact that was never a Drive upload at all
+    (a plain pointer registration with no drive_url in its meta) must not
+    fabricate one — the caller's own meta is used as-is in that case."""
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    content_sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"  # sha256("hello")
+
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    await api_client.post(
+        f"/v1/runs/{run_id}/artifacts",
+        json={"kind": "other", "uri": "s3://bucket/x", "sha256": content_sha256, "name": "harness.py"},
+        headers=_auth(write_key),
+    )
+
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload",
+        json={"filename": "harness.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "harness.py"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    assert "drive_url" not in resp.json()["meta"]
+
+
 def _drive_mocks(monkeypatch):
     from chuk_experiments_server import drive_storage
     from chuk_experiments_server.config import settings
@@ -574,6 +711,28 @@ async def test_artifact_download_gdrive_redirects_without_r2(api_client, write_k
     )
     assert resp.status_code == HTTPStatus.FOUND
     assert resp.headers["location"] == "https://drive.google.com/drive/folders/abc123"
+
+
+async def test_artifact_download_rejects_untrusted_drive_url(api_client, write_key):
+    """register_artifact accepts arbitrary meta, so a crafted drive_url
+    pointing off Google's domain must never be followed — otherwise
+    /download is an open redirect for any WRITE-scoped caller."""
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={
+                "kind": "other",
+                "uri": "gdrive://abc123",
+                "meta": {"drive_url": "https://evil.example.com/phish"},
+            },
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.get(f"/v1/artifacts/{artifact_id}/download", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 async def test_artifact_lineage_splits_produced_and_used(api_client, write_key):

@@ -24,8 +24,10 @@ class _FakeFilesResource:
     def __init__(self, list_response=None):
         self._list_response = list_response or {"files": []}
         self.create_calls: list[dict] = []
+        self.list_queries: list[str] = []
 
     def list(self, q, fields):
+        self.list_queries.append(q)
         return _Execute(self._list_response)
 
     def create(self, body, fields=None, media_body=None):
@@ -60,6 +62,21 @@ def test_ensure_folder_creates_without_parent_when_none():
     files = _FakeFilesResource()
     drive_storage.ensure_folder(_FakeDriveService(files), "root-folder", None)
     assert "parents" not in files.create_calls[0]["body"]
+
+
+def test_ensure_folder_escapes_single_quotes_in_name():
+    """A caller-controlled name containing a `'` must not break out of
+    Drive's query string literal — escaped per Drive's documented
+    backslash convention, same as the SQL-injection class of bug."""
+    files = _FakeFilesResource()
+    drive_storage.ensure_folder(_FakeDriveService(files), "tok-v12's harness", "parent-id")
+    assert "name = 'tok-v12\\'s harness'" in files.list_queries[0]
+
+
+def test_ensure_folder_escapes_backslashes_before_quotes():
+    files = _FakeFilesResource()
+    drive_storage.ensure_folder(_FakeDriveService(files), r"weird\name", "parent-id")
+    assert "weird\\\\name" in files.list_queries[0]
 
 
 def test_ensure_folder_path_chains_through_each_part():
