@@ -221,6 +221,15 @@ class ArtifactUploadRequest(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
+class ArtifactBatchUploadRequest(BaseModel):
+    """Body for POST .../artifacts/upload-batch — the same content-addressed
+    upload as ArtifactUploadRequest, but N files in one round trip instead of
+    N separate MCP tool calls. Each item dedups independently, including
+    against another item earlier in the same batch."""
+
+    items: list[ArtifactUploadRequest] = Field(min_length=1)
+
+
 class ArtifactPresignResponse(BaseModel):
     upload_url: str
     uri: str

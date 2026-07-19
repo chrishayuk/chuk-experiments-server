@@ -384,6 +384,115 @@ async def test_artifacts_upload_dedups_by_name_and_sha(api_client, write_key, mo
     assert second.json()["uri"] == first.json()["uri"]
 
 
+def _drive_mocks(monkeypatch):
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    upload_calls = []
+    file_ids = iter(f"fake-file-id-{i}" for i in range(1000))
+    monkeypatch.setattr(
+        drive_storage,
+        "upload_bytes",
+        lambda service, filename, content, parent_id: upload_calls.append(filename) or next(file_ids),
+    )
+    return upload_calls
+
+
+async def test_artifacts_upload_batch_creates_each_item(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch",
+        json={
+            "items": [
+                {"filename": "a.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "a"},
+                {"filename": "b.py", "kind": "other", "content_base64": "d29ybGQ=", "name": "b"},
+            ]
+        },
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert [a["name"] for a in body] == ["a", "b"]
+    assert [a["role"] for a in body] == ["produced", "produced"]
+    assert body[0]["uri"] != body[1]["uri"]
+
+
+async def test_artifacts_upload_batch_dedups_within_same_batch(api_client, write_key, monkeypatch):
+    upload_calls = _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+
+    same_item = {"filename": "harness.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "harness"}
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch",
+        json={"items": [same_item, dict(same_item)]},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert len(upload_calls) == 1
+    assert [a["role"] for a in body] == ["produced", "used"]
+    assert body[0]["uri"] == body[1]["uri"]
+
+
+async def test_artifacts_upload_batch_bad_item_fails_whole_batch_with_no_uploads(
+    api_client, write_key, monkeypatch
+):
+    upload_calls = _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch",
+        json={
+            "items": [
+                {"filename": "good.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "good"},
+                {
+                    "filename": "bad.py",
+                    "kind": "other",
+                    "content_base64": "not-valid-base64!!!",
+                    "name": "bad",
+                },
+            ]
+        },
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "items[1]" in resp.json()["error"]
+    assert upload_calls == []
+
+
+async def test_artifacts_upload_batch_not_configured(api_client, write_key, monkeypatch):
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: False))
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch",
+        json={"items": [{"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8=", "name": "x"}]},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
+
+
+async def test_artifacts_upload_batch_rejects_empty_items(api_client, write_key, monkeypatch):
+    _drive_mocks(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch", json={"items": []}, headers=_auth(write_key)
+    )
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
 async def test_artifacts_upload_rejects_invalid_base64(api_client, write_key, monkeypatch):
     from chuk_experiments_server.config import settings
 

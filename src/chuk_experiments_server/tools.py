@@ -337,6 +337,30 @@ async def upload_artifact_to_drive(
 
 
 @mcp.tool
+async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> Any:
+    """Upload several files to Google Drive and register them as artifacts
+    for a run in one call — use this instead of calling
+    upload_artifact_to_drive once per file when you have more than one file
+    ready at the same time (e.g. a harness script plus its canonicalizer).
+    Each item dedups independently by (name, sha256), including against an
+    earlier item in the same batch.
+
+    All items are validated before anything is uploaded — one bad item
+    fails the whole batch rather than leaving some files stored and others
+    missing.
+
+    Args:
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
+        items: One dict per file, each with the same shape as
+            upload_artifact_to_drive's arguments:
+            filename, kind, name, content_base64, and optionally meta.
+
+    Returns a list of created artifacts, in the same order as items.
+    """
+    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts/upload-batch", json={"items": items})
+
+
+@mcp.tool
 async def get_artifact_lineage(artifact_id: int) -> Any:
     """Which run produced this artifact's content, and which other runs have
     since reused it (a dedup hit via upload_artifact_to_drive) — falls out

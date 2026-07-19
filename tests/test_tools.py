@@ -91,6 +91,32 @@ async def test_register_artifact_lineage_and_pins(tool_caller):
     assert resolved["id"] == produced["id"]
 
 
+async def test_upload_artifacts_batch_forwards_and_dedups(tool_caller, monkeypatch):
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    upload_calls = []
+    monkeypatch.setattr(
+        drive_storage,
+        "upload_bytes",
+        lambda service, filename, content, parent_id: upload_calls.append(filename) or "fake-file-id",
+    )
+
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    same_item = {"filename": "harness.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "harness"}
+    results = await tools.upload_artifacts_batch(run["id"], [same_item, dict(same_item)])
+
+    assert len(upload_calls) == 1
+    assert [a["role"] for a in results] == ["produced", "used"]
+    assert results[0]["uri"] == results[1]["uri"]
+
+
 async def test_compare_runs(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})

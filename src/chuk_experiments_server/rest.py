@@ -35,6 +35,7 @@ from .errors import error_payload
 from .models import (
     ApiKeyCreate,
     AppUserCreate,
+    ArtifactBatchUploadRequest,
     ArtifactCreate,
     ArtifactPinSet,
     ArtifactPresignRequest,
@@ -363,38 +364,24 @@ async def run_artifacts_presign(request: Request) -> Response:
     )
 
 
-@mcp.endpoint("/v1/runs/{run_id}/artifacts/upload", methods=["POST"])
-@_with_error_handling
-async def run_artifacts_upload(request: Request) -> Response:
-    """Content travels through this server as base64 (unlike the R2 presign
-    flow, where bytes never transit it at all) and gets uploaded straight to
-    Google Drive — for small provenance/config/log/dataset files an agent
-    has bytes for right now, not large checkpoints (those belong in R2).
-
-    Content-addressed by (name, sha256): if this exact content was already
-    uploaded under this name by an earlier run, that upload is reused
-    (role=used) instead of uploading again — a harness reused across many
-    runs is only ever stored once."""
-    await auth.require_scope_from_request(request, Scope.WRITE)
-    if not settings.google_drive_configured:
-        return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
-
-    run_id = request.path_params["run_id"]
-    await service.get_run(run_id)  # 404s if the run doesn't exist
-    data = ArtifactUploadRequest.model_validate(await request.json())
-
+def _decode_artifact_content(content_base64: str) -> tuple[bytes | None, str | None]:
+    """(content, None) on success, (None, error message) on failure — shared
+    by the single-item and batch upload routes so both report bad input
+    identically."""
     try:
-        content = base64.b64decode(data.content_base64, validate=True)
+        content = base64.b64decode(content_base64, validate=True)
     except binascii.Error:
-        return JSONResponse(
-            {"error": "content_base64 is not valid base64"}, status_code=HTTPStatus.BAD_REQUEST.value
-        )
+        return None, "content_base64 is not valid base64"
     if len(content) > _MAX_UPLOAD_BYTES:
-        return JSONResponse(
-            {"error": f"content exceeds {_MAX_UPLOAD_BYTES} bytes — use the R2 presign flow for large files"},
-            status_code=HTTPStatus.BAD_REQUEST.value,
-        )
+        return None, f"content exceeds {_MAX_UPLOAD_BYTES} bytes — use the R2 presign flow for large files"
+    return content, None
 
+
+async def _upload_or_dedup_artifact(run_id: str, data: ArtifactUploadRequest, content: bytes) -> Any:
+    """Content-addressed by (name, sha256): if this exact content was
+    already uploaded under this name — by an earlier run, or an earlier item
+    in the same batch — that upload is reused (role=used) instead of
+    uploading again."""
     content_sha256 = hashlib.sha256(content).hexdigest()
     existing = await service.find_artifact_by_name_sha(data.name, content_sha256)
     if existing is not None:
@@ -420,7 +407,72 @@ async def run_artifacts_upload(request: Request) -> Response:
         name=data.name,
         role=role,
     )
-    return _ok(await service.register_artifact(run_id, artifact_data), status=HTTPStatus.CREATED)
+    return await service.register_artifact(run_id, artifact_data)
+
+
+@mcp.endpoint("/v1/runs/{run_id}/artifacts/upload", methods=["POST"])
+@_with_error_handling
+async def run_artifacts_upload(request: Request) -> Response:
+    """Content travels through this server as base64 (unlike the R2 presign
+    flow, where bytes never transit it at all) and gets uploaded straight to
+    Google Drive — for small provenance/config/log/dataset files an agent
+    has bytes for right now, not large checkpoints (those belong in R2).
+
+    Content-addressed by (name, sha256): if this exact content was already
+    uploaded under this name by an earlier run, that upload is reused
+    (role=used) instead of uploading again — a harness reused across many
+    runs is only ever stored once. Uploading several files at once? Use
+    POST .../artifacts/upload-batch instead of N calls to this route."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    if not settings.google_drive_configured:
+        return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    run_id = request.path_params["run_id"]
+    await service.get_run(run_id)  # 404s if the run doesn't exist
+    data = ArtifactUploadRequest.model_validate(await request.json())
+
+    content, error = _decode_artifact_content(data.content_base64)
+    if error is not None:
+        return JSONResponse({"error": error}, status_code=HTTPStatus.BAD_REQUEST.value)
+
+    artifact = await _upload_or_dedup_artifact(run_id, data, content)
+    return _ok(artifact, status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/runs/{run_id}/artifacts/upload-batch", methods=["POST"])
+@_with_error_handling
+async def run_artifacts_upload_batch(request: Request) -> Response:
+    """Same content-addressed upload as .../artifacts/upload, but N files in
+    one round trip instead of N separate calls — each item dedups
+    independently, including against an earlier item in the same batch (a
+    harness file registered twice in one batch is only uploaded once).
+
+    All items are base64-decoded and size-checked before anything is
+    uploaded — one bad item fails the whole batch with no partial uploads.
+    Returns a JSON array of created artifacts, in request order."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    if not settings.google_drive_configured:
+        return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
+
+    run_id = request.path_params["run_id"]
+    await service.get_run(run_id)  # 404s if the run doesn't exist
+    batch = ArtifactBatchUploadRequest.model_validate(await request.json())
+
+    decoded_items: list[bytes] = []
+    for index, item in enumerate(batch.items):
+        content, error = _decode_artifact_content(item.content_base64)
+        if error is not None:
+            return JSONResponse(
+                {"error": f"items[{index}] ({item.filename}): {error}"},
+                status_code=HTTPStatus.BAD_REQUEST.value,
+            )
+        decoded_items.append(content)
+
+    results = [
+        await _upload_or_dedup_artifact(run_id, item, content)
+        for item, content in zip(batch.items, decoded_items, strict=True)
+    ]
+    return _ok(results, status=HTTPStatus.CREATED)
 
 
 @mcp.endpoint("/v1/artifacts/{artifact_id:int}/download", methods=["GET"])

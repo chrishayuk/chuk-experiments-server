@@ -20,16 +20,17 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
 - **Store and dedup artifacts.** Register a pointer to anything already
   reachable (`s3://`, `gdrive://`, `https://`) — never a local `file://`
   path — or hand this server actual bytes and it uploads them to Google
-  Drive for you (`POST /runs/{id}/artifacts/upload`). Uploads are
-  **content-addressed by (name, sha256)**: register the same harness script
-  or dataset under the same name across many runs and it's stored exactly
-  once — every later run just gets a lightweight pointer back to the
-  original, tagged `role=used` instead of `role=produced`. `GET
-  /artifacts/{id}/lineage` answers "which run made this, and which other
-  runs have since reused it" for free from that same `(name, sha256, role)`
-  grouping — no separate graph table. Large binaries (checkpoints) go
-  straight to R2 via presigned URLs instead — bytes never transit this
-  server at all.
+  Drive for you (`POST /runs/{id}/artifacts/upload`, or `.../upload-batch`
+  for several files in one round trip). Uploads are **content-addressed by
+  (name, sha256)**: register the same harness script or dataset under the
+  same name across many runs (or several times in one batch) and it's
+  stored exactly once — every later reference just gets a lightweight
+  pointer back to the original, tagged `role=used` instead of
+  `role=produced`. `GET /artifacts/{id}/lineage` answers "which run made
+  this, and which other runs have since reused it" for free from that same
+  `(name, sha256, role)` grouping — no separate graph table. Large binaries
+  (checkpoints) go straight to R2 via presigned URLs instead — bytes never
+  transit this server at all.
 - **Pin a moving target.** `PUT /pins/{name}` points a named alias (e.g.
   `"tok-v12-tokenizer:latest"`) at a specific artifact and repoints it on
   demand, W&B-`"latest"`/`"best"`-style — so "the current best checkpoint"
