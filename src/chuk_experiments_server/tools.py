@@ -251,6 +251,7 @@ async def register_artifact(
     kind: str,
     uri: str,
     sha256: str | None = None,
+    name: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Any:
     """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for a run.
@@ -272,14 +273,20 @@ async def register_artifact(
     (POST /v1/runs/{run_id}/artifacts/presign) instead of either — bytes
     should go straight to R2, not through this server.
 
+    A checkpoint already sitting in another project's own storage (e.g.
+    gpu-training-harness's s3://chuk-train/...) should just be linked here
+    via this uri, not re-uploaded — this call only ever records a pointer.
+
     Args:
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
         uri: Storage URI already reachable — s3://..., gdrive://..., or https://...
-        sha256: Content hash, if known
+        sha256: Content hash, if known — enables lineage/dedup lookups when name is also given
+        name: Logical name grouping this content across runs (e.g. "v11-tokenizer"),
+            for get_artifact_lineage/pins — omit for a one-off pointer with no reuse story
         meta: Additional metadata (step, epoch, format, ...)
     """
-    body = {"kind": kind, "uri": uri, "sha256": sha256, "meta": meta or {}}
+    body = {"kind": kind, "uri": uri, "sha256": sha256, "name": name, "meta": meta or {}}
     return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
 
 
@@ -288,6 +295,7 @@ async def upload_artifact_to_drive(
     run_id: str,
     filename: str,
     kind: str,
+    name: str,
     content_base64: str,
     meta: dict[str, Any] | None = None,
 ) -> Any:
@@ -295,6 +303,14 @@ async def upload_artifact_to_drive(
     resulting gdrive:// artifact for a run, in one step — use this whenever
     you have actual bytes (a harness script, a small dataset, a config/pin
     file, a log or report) rather than a URI that's already reachable.
+
+    Content-addressed by (name, sha256 of the bytes): if this exact content
+    was already uploaded under this name by an earlier run, that upload is
+    reused instead of uploading again — register a harness/dataset under
+    the same name every time you use it (e.g. "tok-v12-harness"), and it
+    only gets stored once no matter how many runs reference it. Check
+    get_artifact_lineage on the returned artifact id to see every run that
+    has used a given piece of content.
 
     Intended for small-to-moderate provenance/config/log/dataset files, not
     multi-MB+ checkpoints — those should go through the R2 presign flow
@@ -305,11 +321,56 @@ async def upload_artifact_to_drive(
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
         filename: Name to give the file in Drive (e.g. "tokenizer_bench.py")
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
+        name: Logical name for dedup/lineage (e.g. "tok-v12-harness") — reuse the
+            same name every time this exact content might recur across runs
         content_base64: The file's raw bytes, base64-encoded
-        meta: Additional metadata (role, step, format, ...)
+        meta: Additional metadata (step, format, ...)
     """
-    body = {"filename": filename, "kind": kind, "content_base64": content_base64, "meta": meta or {}}
+    body = {
+        "filename": filename,
+        "kind": kind,
+        "name": name,
+        "content_base64": content_base64,
+        "meta": meta or {},
+    }
     return await _api_request("POST", f"/v1/runs/{run_id}/artifacts/upload", json=body)
+
+
+@mcp.tool
+async def get_artifact_lineage(artifact_id: int) -> Any:
+    """Which run produced this artifact's content, and which other runs have
+    since reused it (a dedup hit via upload_artifact_to_drive) — falls out
+    of grouping by (name, sha256), so this only returns something useful
+    for artifacts registered with a name.
+
+    Args:
+        artifact_id: Artifact id (from register_artifact/upload_artifact_to_drive's response)
+    """
+    return await _api_request("GET", f"/v1/artifacts/{artifact_id}/lineage")
+
+
+@mcp.tool
+async def set_pin(name: str, artifact_id: int) -> Any:
+    """Point a named, repointable alias (e.g. "tok-v12-tokenizer:latest" or
+    ":best") at a specific artifact — creates the pin if it doesn't exist
+    yet, or repoints it if it does. Use get_pin to resolve a pin back to
+    its current artifact.
+
+    Args:
+        name: Pin name (any string you choose, e.g. "tok-v12-tokenizer:latest")
+        artifact_id: The artifact this pin should point at right now
+    """
+    return await _api_request("PUT", f"/v1/pins/{name}", json={"artifact_id": artifact_id})
+
+
+@mcp.tool
+async def get_pin(name: str) -> Any:
+    """Resolve a named pin to its current artifact.
+
+    Args:
+        name: Pin name (e.g. "tok-v12-tokenizer:latest")
+    """
+    return await _api_request("GET", f"/v1/pins/{name}")
 
 
 @mcp.tool

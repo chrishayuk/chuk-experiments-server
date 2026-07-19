@@ -44,6 +44,8 @@ from .models import (
     ApiKeySummary,
     Artifact,
     ArtifactCreate,
+    ArtifactLineage,
+    ArtifactPin,
     DashboardIdentity,
     Experiment,
     ExperimentCreate,
@@ -493,7 +495,7 @@ async def get_run(run_id: str) -> Run:
     data["artifacts"] = [
         dict(a)
         for a in await pool.fetch(
-            "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at "
+            "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role "
             "FROM artifact WHERE run_id = $1 ORDER BY created_at",
             run_id,
         )
@@ -771,9 +773,9 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
         raise NotFoundError(f"No run with id {run_id}")
     row = await pool.fetchrow(
         """
-        INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at
+        INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta, name, role)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
         """,
         run_id,
         data.kind.value,
@@ -781,6 +783,8 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
         data.bytes,
         data.sha256,
         data.meta,
+        data.name,
+        data.role.value,
     )
     return Artifact.model_validate(dict(row))
 
@@ -788,7 +792,8 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
 async def get_artifact(artifact_id: int) -> Artifact:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at FROM artifact WHERE id = $1",
+        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role "
+        "FROM artifact WHERE id = $1",
         artifact_id,
     )
     if row is None:
@@ -821,7 +826,7 @@ async def find_checkpoints(
     limit_param = bind(limit)
     rows = await pool.fetch(
         f"""
-        SELECT a.id, a.run_id, a.kind, a.uri, a.bytes, a.sha256, a.meta, a.created_at
+        SELECT a.id, a.run_id, a.kind, a.uri, a.bytes, a.sha256, a.meta, a.created_at, a.name, a.role
         FROM artifact a
         JOIN run r ON r.id = a.run_id
         JOIN experiment e ON e.id = r.experiment_id
@@ -832,6 +837,78 @@ async def find_checkpoints(
         *params,
     )
     return [Artifact.model_validate(dict(row)) for row in rows]
+
+
+async def find_artifact_by_name_sha(name: str, sha256: str) -> Artifact | None:
+    """The dedup lookup behind upload_artifact_to_drive — if content with
+    this exact (name, sha256) has already been uploaded by an earlier run,
+    reuse its uri instead of uploading again. Prefers the PRODUCED row when
+    one exists (the original), falling back to any row sharing the pair."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
+        FROM artifact
+        WHERE name = $1 AND sha256 = $2
+        ORDER BY (role = 'produced') DESC, created_at ASC
+        LIMIT 1
+        """,
+        name,
+        sha256,
+    )
+    return Artifact.model_validate(dict(row)) if row else None
+
+
+async def get_artifact_lineage(artifact_id: int) -> ArtifactLineage:
+    """Every artifact sharing this one's (name, sha256) is the same content
+    — one PRODUCED it (the original upload), any others USED it (a dedup
+    hit from a later run). Falls out of grouping existing rows, no
+    separate lineage table needed."""
+    artifact = await get_artifact(artifact_id)
+    if not artifact.name or not artifact.sha256:
+        return ArtifactLineage(produced_by_run_id=None, used_by_run_ids=[])
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT run_id, role FROM artifact WHERE name = $1 AND sha256 = $2 ORDER BY created_at",
+        artifact.name,
+        artifact.sha256,
+    )
+    produced_by = next((r["run_id"] for r in rows if r["role"] == "produced"), None)
+    used_by = [r["run_id"] for r in rows if r["role"] == "used"]
+    return ArtifactLineage(produced_by_run_id=produced_by, used_by_run_ids=used_by)
+
+
+async def set_pin(name: str, artifact_id: int) -> ArtifactPin:
+    pool = await get_pool()
+    artifact_exists = await pool.fetchval("SELECT 1 FROM artifact WHERE id = $1", artifact_id)
+    if not artifact_exists:
+        raise NotFoundError(f"No artifact with id {artifact_id}")
+    row = await pool.fetchrow(
+        """
+        INSERT INTO artifact_pin (name, artifact_id)
+        VALUES ($1, $2)
+        ON CONFLICT (name) DO UPDATE SET artifact_id = EXCLUDED.artifact_id, updated_at = now()
+        RETURNING id, name, artifact_id, updated_at
+        """,
+        name,
+        artifact_id,
+    )
+    return ArtifactPin.model_validate(dict(row))
+
+
+async def get_pin(name: str) -> Artifact:
+    pool = await get_pool()
+    artifact_id = await pool.fetchval("SELECT artifact_id FROM artifact_pin WHERE name = $1", name)
+    if artifact_id is None:
+        raise NotFoundError(f"No pin named '{name}'")
+    return await get_artifact(artifact_id)
+
+
+async def list_pins() -> list[ArtifactPin]:
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT id, name, artifact_id, updated_at FROM artifact_pin ORDER BY name")
+    return [ArtifactPin.model_validate(dict(row)) for row in rows]
 
 
 # ---------------------------------------------------------------------------

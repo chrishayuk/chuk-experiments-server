@@ -104,6 +104,75 @@ async def test_register_artifact_accepts_gdrive_and_https_uris():
     assert https.uri == "https://example.com/x"
 
 
+async def test_find_artifact_by_name_sha_returns_none_when_no_match():
+    assert await service.find_artifact_by_name_sha("no-such-name", "no-such-sha") is None
+
+
+async def test_find_artifact_by_name_sha_finds_matching_artifact():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    registered = await service.register_artifact(
+        run.id,
+        ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"),
+    )
+    found = await service.find_artifact_by_name_sha("harness", "deadbeef")
+    assert found is not None
+    assert found.id == registered.id
+
+
+async def test_get_artifact_lineage_splits_produced_and_used():
+    await _make_experiment()
+    run_a = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
+    produced = await service.register_artifact(
+        run_a.id,
+        ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"),
+    )
+    await service.register_artifact(
+        run_b.id,
+        ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness", role="used"),
+    )
+
+    lineage = await service.get_artifact_lineage(produced.id)
+    assert lineage.produced_by_run_id == run_a.id
+    assert lineage.used_by_run_ids == [run_b.id]
+
+
+async def test_get_artifact_lineage_empty_for_unnamed_artifact():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc"))
+    lineage = await service.get_artifact_lineage(artifact.id)
+    assert lineage.produced_by_run_id is None
+    assert lineage.used_by_run_ids == []
+
+
+async def test_pin_set_get_list_and_repoint():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact_a = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://a"))
+    artifact_b = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://b"))
+
+    await service.set_pin("harness:latest", artifact_a.id)
+    resolved = await service.get_pin("harness:latest")
+    assert resolved.id == artifact_a.id
+    assert [p.name for p in await service.list_pins()] == ["harness:latest"]
+
+    await service.set_pin("harness:latest", artifact_b.id)
+    resolved_again = await service.get_pin("harness:latest")
+    assert resolved_again.id == artifact_b.id
+
+
+async def test_set_pin_missing_artifact_raises_not_found():
+    with pytest.raises(service.NotFoundError):
+        await service.set_pin("harness:latest", 999999)
+
+
+async def test_get_pin_missing_name_raises_not_found():
+    with pytest.raises(service.NotFoundError):
+        await service.get_pin("no-such-pin")
+
+
 async def test_get_artifact_returns_registered_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))

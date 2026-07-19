@@ -70,6 +70,15 @@ class ArtifactKind(str, Enum):
     OTHER = "other"
 
 
+class ArtifactRole(str, Enum):
+    """Lineage signal on an artifact row: did this run make it, or is this
+    run just referencing content an earlier run already produced (a dedup
+    hit — see service.find_artifact_by_name_sha)?"""
+
+    PRODUCED = "produced"
+    USED = "used"
+
+
 class MetricOp(str, Enum):
     """search_experiments' metric predicate operator — a closed whitelist so
     the SQL comparison operator is never built from raw user input."""

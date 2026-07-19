@@ -73,6 +73,24 @@ async def test_register_artifact_and_find_checkpoints(tool_caller):
     assert [a["uri"] for a in found] == ["s3://bucket/ckpt.bin"]
 
 
+async def test_register_artifact_lineage_and_pins(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    produced = await tools.register_artifact(
+        run["id"], kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"
+    )
+
+    lineage = await tools.get_artifact_lineage(produced["id"])
+    assert lineage["produced_by_run_id"] == run["id"]
+    assert lineage["used_by_run_ids"] == []
+
+    pin = await tools.set_pin("harness:latest", produced["id"])
+    assert pin["artifact_id"] == produced["id"]
+    resolved = await tools.get_pin("harness:latest")
+    assert resolved["id"] == produced["id"]
+
+
 async def test_compare_runs(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})

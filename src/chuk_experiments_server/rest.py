@@ -11,6 +11,7 @@ therefore registered ONCE with `methods=[...]` and dispatch on
 
 import base64
 import binascii
+import hashlib
 from functools import wraps
 from http import HTTPStatus
 from typing import Any, Callable
@@ -27,6 +28,7 @@ from .constants import (
     DEFAULT_SEARCH_LIMIT,
     GDRIVE_URI_PREFIX,
     PRESIGN_PUT_EXPIRY_SECONDS,
+    ArtifactRole,
     Scope,
 )
 from .errors import error_payload
@@ -34,6 +36,7 @@ from .models import (
     ApiKeyCreate,
     AppUserCreate,
     ArtifactCreate,
+    ArtifactPinSet,
     ArtifactPresignRequest,
     ArtifactUploadRequest,
     ExperimentCreate,
@@ -366,13 +369,18 @@ async def run_artifacts_upload(request: Request) -> Response:
     """Content travels through this server as base64 (unlike the R2 presign
     flow, where bytes never transit it at all) and gets uploaded straight to
     Google Drive — for small provenance/config/log/dataset files an agent
-    has bytes for right now, not large checkpoints (those belong in R2)."""
+    has bytes for right now, not large checkpoints (those belong in R2).
+
+    Content-addressed by (name, sha256): if this exact content was already
+    uploaded under this name by an earlier run, that upload is reused
+    (role=used) instead of uploading again — a harness reused across many
+    runs is only ever stored once."""
     await auth.require_scope_from_request(request, Scope.WRITE)
     if not settings.google_drive_configured:
         return JSONResponse(_DRIVE_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)
 
     run_id = request.path_params["run_id"]
-    run = await service.get_run(run_id)  # 404s if the run doesn't exist
+    await service.get_run(run_id)  # 404s if the run doesn't exist
     data = ArtifactUploadRequest.model_validate(await request.json())
 
     try:
@@ -387,15 +395,30 @@ async def run_artifacts_upload(request: Request) -> Response:
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
 
-    drive_client = drive_storage.get_client()
-    root_id = drive_storage.ensure_folder(drive_client, drive_storage.ARCHIVE_ROOT_NAME, None)
-    parent_id = drive_storage.ensure_folder_path(drive_client, root_id, (run.experiment_slug, run_id))
-    file_id = drive_storage.upload_bytes(drive_client, data.filename, content, parent_id)
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    existing = await service.find_artifact_by_name_sha(data.name, content_sha256)
+    if existing is not None:
+        uri = existing.uri
+        meta = {**existing.meta, "source_path": data.filename, **data.meta}
+        role = data.role or ArtifactRole.USED
+    else:
+        drive_client = drive_storage.get_client()
+        root_id = drive_storage.ensure_folder(drive_client, drive_storage.ARCHIVE_ROOT_NAME, None)
+        parent_id = drive_storage.ensure_folder_path(
+            drive_client, root_id, ("artifacts", data.name, content_sha256[:12])
+        )
+        file_id = drive_storage.upload_bytes(drive_client, data.filename, content, parent_id)
+        uri = f"{GDRIVE_URI_PREFIX}{file_id}"
+        meta = {"drive_url": drive_storage.drive_url(file_id), "source_path": data.filename, **data.meta}
+        role = data.role or ArtifactRole.PRODUCED
 
     artifact_data = ArtifactCreate(
         kind=data.kind,
-        uri=f"{GDRIVE_URI_PREFIX}{file_id}",
-        meta={"drive_url": drive_storage.drive_url(file_id), "source_path": data.filename, **data.meta},
+        uri=uri,
+        sha256=content_sha256,
+        meta=meta,
+        name=data.name,
+        role=role,
     )
     return _ok(await service.register_artifact(run_id, artifact_data), status=HTTPStatus.CREATED)
 
@@ -424,6 +447,39 @@ async def artifact_download(request: Request) -> Response:
 
     download_url = storage.presign_get(storage.key_from_uri(artifact.uri))
     return RedirectResponse(download_url, status_code=HTTPStatus.FOUND.value)
+
+
+@mcp.endpoint("/v1/artifacts/{artifact_id:int}/lineage", methods=["GET"])
+@_with_error_handling
+async def artifact_lineage(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return _ok(await service.get_artifact_lineage(request.path_params["artifact_id"]))
+
+
+# ---------------------------------------------------------------------------
+# Pins — named, repointable aliases to a specific artifact (e.g.
+# "tok-v12-tokenizer:latest"), W&B-style.
+# ---------------------------------------------------------------------------
+
+
+@mcp.endpoint("/v1/pins", methods=["GET"])
+@_with_error_handling
+async def pins_collection(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return _ok(await service.list_pins())
+
+
+@mcp.endpoint("/v1/pins/{name}", methods=["GET", "PUT"])
+@_with_error_handling
+async def pin_detail(request: Request) -> Response:
+    name = request.path_params["name"]
+    if request.method == "GET":
+        await auth.require_scope_from_request(request, Scope.READ)
+        return _ok(await service.get_pin(name))
+
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    data = ArtifactPinSet.model_validate(await request.json())
+    return _ok(await service.set_pin(name, data.artifact_id))
 
 
 # ---------------------------------------------------------------------------

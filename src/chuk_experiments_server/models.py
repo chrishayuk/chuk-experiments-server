@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .constants import (
     DEFAULT_LEASE_SECONDS,
     ArtifactKind,
+    ArtifactRole,
     ExperimentStatus,
     MetricOp,
     RunStatus,
@@ -175,6 +176,8 @@ class Artifact(RecordModel):
     sha256: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    name: str | None = None
+    role: ArtifactRole = ArtifactRole.PRODUCED
 
 
 class ArtifactCreate(BaseModel):
@@ -183,6 +186,12 @@ class ArtifactCreate(BaseModel):
     bytes: int | None = None
     sha256: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+    #: Optional — enables dedup lookups (find_artifact_by_name_sha) and
+    #: lineage grouping. A one-off pointer registration (e.g. linking a
+    #: checkpoint that already lives in another project's bucket) doesn't
+    #: need one.
+    name: str | None = None
+    role: ArtifactRole = ArtifactRole.PRODUCED
 
 
 class ArtifactPresignRequest(BaseModel):
@@ -195,11 +204,20 @@ class ArtifactUploadRequest(BaseModel):
     """Body for POST .../artifacts/upload — content travels through this
     server (base64, in the JSON body) to Google Drive, unlike the R2
     presign flow where bytes never transit this server at all. Intended
-    for small provenance/config/log/dataset files, not large checkpoints."""
+    for small provenance/config/log/dataset files, not large checkpoints.
+
+    name is required (not optional, unlike plain ArtifactCreate) — it's
+    the whole point of this endpoint: content-addressed dedup keyed on
+    (name, sha256) of the uploaded bytes, so the same harness/dataset
+    reused across many runs is uploaded to Drive only once."""
 
     filename: str
     kind: ArtifactKind = ArtifactKind.OTHER
     content_base64: str
+    name: str
+    #: None = auto-infer (PRODUCED on first upload of this name+sha256,
+    #: USED when it's a dedup hit against an earlier run's upload).
+    role: ArtifactRole | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -207,6 +225,29 @@ class ArtifactPresignResponse(BaseModel):
     upload_url: str
     uri: str
     expires_in: int
+
+
+class ArtifactLineage(BaseModel):
+    """Which run produced this artifact's content, and which other runs
+    have since referenced the same (name, sha256) — falls out of grouping
+    existing artifact rows by role, no separate lineage table needed."""
+
+    produced_by_run_id: str | None = None
+    used_by_run_ids: list[str] = Field(default_factory=list)
+
+
+class ArtifactPin(RecordModel):
+    """A named, repointable alias to a specific artifact — e.g.
+    'tok-v12-tokenizer:latest' — W&B-style."""
+
+    id: int
+    name: str
+    artifact_id: int
+    updated_at: datetime
+
+
+class ArtifactPinSet(BaseModel):
+    artifact_id: int
 
 
 class Run(RecordModel):

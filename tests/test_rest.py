@@ -305,7 +305,7 @@ async def test_artifacts_upload_not_configured(api_client, write_key, monkeypatc
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
         f"/v1/runs/{run_id}/artifacts/upload",
-        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8="},
+        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8=", "name": "x"},
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
@@ -330,7 +330,12 @@ async def test_artifacts_upload_configured_success(api_client, write_key, monkey
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
         f"/v1/runs/{run_id}/artifacts/upload",
-        json={"filename": "tokenizer_bench.py", "kind": "other", "content_base64": "aGVsbG8="},
+        json={
+            "filename": "tokenizer_bench.py",
+            "kind": "other",
+            "content_base64": "aGVsbG8=",
+            "name": "tokenizer_bench.py",
+        },
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.CREATED
@@ -338,6 +343,45 @@ async def test_artifacts_upload_configured_success(api_client, write_key, monkey
     assert body["uri"] == "gdrive://fake-file-id"
     assert body["meta"]["source_path"] == "tokenizer_bench.py"
     assert "drive_url" in body["meta"]
+    assert body["name"] == "tokenizer_bench.py"
+    assert body["role"] == "produced"
+
+
+async def test_artifacts_upload_dedups_by_name_and_sha(api_client, write_key, monkeypatch):
+    """A second upload of the same (name, sha256) — as if a harness reused
+    across TOK-1..TOK-5 were uploaded again — must reuse the first upload's
+    Drive file instead of uploading a second time."""
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    upload_calls = []
+    monkeypatch.setattr(
+        drive_storage,
+        "upload_bytes",
+        lambda service, filename, content, parent_id: upload_calls.append(filename) or "fake-file-id",
+    )
+
+    await _create_experiment(api_client, write_key)
+    run_a = (await _enqueue_run(api_client, write_key)).json()["id"]
+    run_b_resp = await api_client.post(
+        "/v1/experiments/cn-7/runs", json={"slug": "seed-1"}, headers=_auth(write_key)
+    )
+    run_b = run_b_resp.json()["id"]
+
+    body = {"filename": "harness.py", "kind": "other", "content_base64": "aGVsbG8=", "name": "harness.py"}
+    first = await api_client.post(f"/v1/runs/{run_a}/artifacts/upload", json=body, headers=_auth(write_key))
+    second = await api_client.post(f"/v1/runs/{run_b}/artifacts/upload", json=body, headers=_auth(write_key))
+
+    assert first.status_code == HTTPStatus.CREATED
+    assert second.status_code == HTTPStatus.CREATED
+    assert len(upload_calls) == 1
+    assert first.json()["role"] == "produced"
+    assert second.json()["role"] == "used"
+    assert second.json()["uri"] == first.json()["uri"]
 
 
 async def test_artifacts_upload_rejects_invalid_base64(api_client, write_key, monkeypatch):
@@ -348,7 +392,7 @@ async def test_artifacts_upload_rejects_invalid_base64(api_client, write_key, mo
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
         f"/v1/runs/{run_id}/artifacts/upload",
-        json={"filename": "x.txt", "kind": "other", "content_base64": "not-valid-base64!!!"},
+        json={"filename": "x.txt", "kind": "other", "content_base64": "not-valid-base64!!!", "name": "x"},
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
@@ -364,7 +408,7 @@ async def test_artifacts_upload_rejects_oversized_content(api_client, write_key,
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
         f"/v1/runs/{run_id}/artifacts/upload",
-        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8="},
+        json={"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8=", "name": "x"},
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
@@ -421,6 +465,75 @@ async def test_artifact_download_gdrive_redirects_without_r2(api_client, write_k
     )
     assert resp.status_code == HTTPStatus.FOUND
     assert resp.headers["location"] == "https://drive.google.com/drive/folders/abc123"
+
+
+async def test_artifact_lineage_splits_produced_and_used(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_a = (await _enqueue_run(api_client, write_key)).json()["id"]
+    run_b_resp = await api_client.post(
+        "/v1/experiments/cn-7/runs", json={"slug": "seed-1"}, headers=_auth(write_key)
+    )
+    run_b = run_b_resp.json()["id"]
+
+    produced = (
+        await api_client.post(
+            f"/v1/runs/{run_a}/artifacts",
+            json={"kind": "other", "uri": "gdrive://abc", "sha256": "deadbeef", "name": "harness"},
+            headers=_auth(write_key),
+        )
+    ).json()
+    await api_client.post(
+        f"/v1/runs/{run_b}/artifacts",
+        json={
+            "kind": "other",
+            "uri": "gdrive://abc",
+            "sha256": "deadbeef",
+            "name": "harness",
+            "role": "used",
+        },
+        headers=_auth(write_key),
+    )
+
+    resp = await api_client.get(f"/v1/artifacts/{produced['id']}/lineage", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    body = resp.json()
+    assert body["produced_by_run_id"] == run_a
+    assert body["used_by_run_ids"] == [run_b]
+
+
+async def test_pins_crud_and_write_scope_gating(api_client, write_key):
+    await auth_module.upsert_bootstrap_key("readonly:read:readonly-pins-key")
+
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "other", "uri": "gdrive://abc"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    denied = await api_client.put(
+        "/v1/pins/harness:latest",
+        json={"artifact_id": artifact_id},
+        headers=_auth("readonly-pins-key"),
+    )
+    assert denied.status_code == HTTPStatus.FORBIDDEN
+
+    created = await api_client.put(
+        "/v1/pins/harness:latest", json={"artifact_id": artifact_id}, headers=_auth(write_key)
+    )
+    assert created.status_code == HTTPStatus.OK
+    assert created.json()["artifact_id"] == artifact_id
+
+    fetched = await api_client.get("/v1/pins/harness:latest", headers=_auth(write_key))
+    assert fetched.status_code == HTTPStatus.OK
+    assert fetched.json()["id"] == artifact_id
+
+    listed = await api_client.get("/v1/pins", headers=_auth(write_key))
+    assert listed.status_code == HTTPStatus.OK
+    assert [p["name"] for p in listed.json()] == ["harness:latest"]
 
 
 async def test_runs_compare(api_client, write_key):
