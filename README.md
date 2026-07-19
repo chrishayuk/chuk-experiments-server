@@ -46,6 +46,20 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   `(name, sha256, role)` grouping — no separate graph table. Large binaries
   (checkpoints) go straight to R2 via presigned URLs instead — bytes never
   transit this server at all.
+- **Reference a git repo or Hugging Face Hub model/dataset directly** —
+  for a harness that's already a GitHub repo, or a checkpoint already
+  published on the Hub, `register_git_artifact`/`register_hf_artifact`
+  record `git+https://github.com/{owner}/{repo}@{commit}` /
+  `hf://model|dataset/{repo_id}@{revision}` pointers with no bytes moved
+  at all. `POST /artifacts/{id}/verify` (or the `verify_artifact` MCP
+  tool) does a real, on-demand check that the reference still resolves —
+  a commit against GitHub's API, a revision against HF's file tree API,
+  summing real file sizes against the artifact's own recorded `bytes` if
+  given. This matters: a name/revision match alone isn't proof of
+  anything — an HF repo can exist while missing most of its actual
+  content. Results are cached (`verify_status`/`verified_at`/
+  `verify_detail`), not re-checked automatically, since GitHub's
+  unauthenticated API is capped at 60 requests/hour.
 - **Pin a moving target.** `PUT /pins/{name}` points a named alias (e.g.
   `"tok-v12-tokenizer:latest"`) at a specific artifact and repoints it on
   demand, W&B-`"latest"`/`"best"`-style — so "the current best checkpoint"
@@ -122,6 +136,8 @@ src/chuk_experiments_server/
   storage.py          R2 presigned upload/download
   drive_storage.py    Google Drive upload/folder helpers — backs the artifact upload
                        route and the archive_*_to_drive.py scripts
+  external_refs.py    git+/hf:// artifact reference URI build/parse + real verification
+                       against GitHub's/Hugging Face's REST APIs
   templates/          app.html (the SPA shell — CSS + vanilla JS, no build step) + login.html
   cli.py              `chuk-experiments-server migrate|serve|keys create|sweep`
 migrations/
@@ -129,6 +145,8 @@ migrations/
   002_string_ids.sql        experiment.id/run.id -> sortable string ids
   003_users_and_keys.sql    team/app_user tables; api_key gets team_id + created_by_user_id
   004_artifact_lineage.sql  artifact gets name/role; artifact_pin table (dedup + lineage + pins)
+  005_artifact_produced_unique.sql  unique index on (name, sha256) where role='produced' (dedup race fix)
+  006_artifact_verify.sql   artifact gets verify_status/verified_at/verify_detail (git+/hf:// verification)
 scripts/
   migrate_chris_experiments.py          ../chris-experiments/INDEX.md (155 experiments, 8 programmes)
   migrate_chuk_mlx.py                    ../chuk-mlx/experiments/ (31, no central index — per-dir EXPERIMENT.md)

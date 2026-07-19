@@ -142,6 +142,29 @@ decisions made along the way that the spec didn't originally cover.
   local CLI wrapper (impractical once "the servers are all remote").
   `upload_artifact_to_drive`/`upload_artifacts_batch` MCP tool docstrings
   now explicitly steer toward it for anything beyond a trivial inline size.
+- **`git`/`hf` artifact reference kinds + real verification** (2026-07-19)
+  — `register_git_artifact`/`register_hf_artifact` record
+  `git+https://github.com/{owner}/{repo}@{commit}` /
+  `hf://model|dataset/{repo_id}@{revision}` pointers, no bytes moved, on
+  the existing pointer-registration path (just an extended
+  `VALID_ARTIFACT_URI_PREFIXES`, no new REST route needed for
+  registration). The actual point is `POST /artifacts/{id}/verify`
+  (`external_refs.py`): a same-day disk-reclaim pass over `larql/output/`
+  found a vindex that matched an HF repo by name but was only 2.6GB of an
+  expected 36.5GB — the weight binaries were never actually uploaded.
+  `verify_hf_ref` does the same file-list-and-size diff that caught it by
+  hand (HF's `.../tree/{revision}?recursive=true`, summed against the
+  artifact's own recorded `bytes`); `verify_git_ref` confirms a commit
+  still resolves against GitHub's API (only `github.com` is checked —
+  anything else comes back `unverifiable`, not a false `verified`). Both
+  via plain `httpx` REST calls, no new SDK dependency. Cached
+  (`verify_status`/`verified_at`/`verify_detail`), not re-checked
+  automatically — GitHub's unauthenticated API is 60 req/hr. Dashboard
+  renders these as a clickable chip to the real github.com/huggingface.co
+  page plus a verified/missing/unverifiable badge, with re-verify firing
+  only on click. Explicitly not yet done: going through *existing*
+  artifacts already in production to see which are really git/HF-sourced
+  and re-registering them under this scheme — needs a live query first.
 
 ## Fixed (found via code review, 2026-07-19)
 
@@ -308,32 +331,9 @@ out of scope. Prioritized, starting with the trace/span tree:
    specifically, not ML-specific at all.
 5. **Notifications on gate pass/fail or run completion** — a webhook/Slack
    ping instead of a manual check-back on long-running async work.
-6. **First-class external artifact sources: git repos, HF datasets, HF
-   models/checkpoints** — today `register_artifact` accepts an arbitrary
-   `uri` (any `s3://`/`gdrive://`/`https://`), but the only *upload* paths
-   are Drive and R2, so a harness that's itself a git repo, or a
-   checkpoint that's already an HF model, ends up either re-uploaded
-   wastefully or logged as an opaque URI with no structure. Concretely
-   motivated by a 2026-07-19 disk-reclaim pass over `larql/output/`: one
-   vindex directory *looked* backed up by name (`granite-4.1-30b-q4k`
-   matching `chrishayuk/granite-4.1-30b-q4k-vindex` on HF) but HF only had
-   2.6GB of its 36.5GB — the actual weight binaries were never published,
-   caught only by diffing the local file list against `HfApi.model_info(...,
-   files_metadata=True)` one-off in a shell, exactly the kind of check that
-   belongs in this server, not a scratch script. Two new `kind`s beyond
-   `drive`/`r2`: `git` (`repo` URL + pinned `commit` SHA — for "this run's
-   harness *is* `github.com/org/repo@abc123`," no source duplication into
-   Drive) and `hf` (`repo_id` + `revision`, `model` or `dataset` — for
-   checkpoints/datasets that already live on the Hub). Both need a
-   verification step (`GET /artifacts/{id}/verify`?) that does the same
-   diff-against-remote check the larql pass did by hand: git via `git
-   ls-remote`/checking the commit is reachable, HF via `HfApi.model_info`/
-   `dataset_info` file-list-and-size diff against what was registered —
-   surfacing "claims to be backed up but isn't" as a first-class, queryable
-   fact instead of something only discovered by an ad hoc audit. MCP tools
-   (`register_git_artifact`/`register_hf_artifact`), REST fields, and a
-   dashboard badge (git commit / HF repo link, verified vs. stale) all
-   follow from the same two `kind`s.
+
+(Item 6, first-class git/HF artifact reference kinds with real
+verification, shipped 2026-07-19 — see "Done" above.)
 
 Smaller, not-really-new-feature items noted alongside these: a Compare
 view in the dashboard (UI only, over the existing `compare_runs`), using
