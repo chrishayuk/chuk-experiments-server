@@ -112,6 +112,17 @@
   pre { background: #0a0a0a; border: 1px solid var(--grid); padding: .75rem; border-radius: 8px;
     overflow-x: auto; font-family: var(--mono); font-size: .82rem; color: var(--ink2); }
 
+  /* Labeled key/value rendering for design/config/workspec — scannable
+     sections instead of one raw JSON blob. */
+  dl.kv { margin: 0; }
+  dl.kv dt { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+    font-weight: 600; margin-top: .7rem; }
+  dl.kv dt:first-child { margin-top: 0; }
+  dl.kv dd { margin: .25rem 0 0; }
+  dl.kv ul { margin: .2rem 0 0; padding-left: 1.1rem; }
+  dl.kv li { margin: .2rem 0; }
+  dl.kv dl.kv { margin-left: .9rem; margin-top: .3rem; }
+
   .muted { color: var(--muted); }
   .empty { color: var(--muted); font-style: italic; padding: 2rem 0; text-align: center; }
   .err { color: var(--critical); }
@@ -144,6 +155,27 @@ const fmtCost=v=>(v===null||v===undefined)?"—":"$"+Number(v).toFixed(4);
 const STATUS_CLASS={draft:"mut",planned:"mut",running:"run",completed:"good",abandoned:"bad",
   superseded:"mut",queued:"mut",claimed:"run",failed:"bad",killed:"bad",lost:"bad",cancelled:"mut"};
 const pill=s=>`<span class="st ${STATUS_CLASS[s]||"mut"}">${esc(s)}</span>`;
+
+/* Renders an arbitrary design/config/workspec object as labeled
+   sections (dt/dd per top-level key, bulleted arrays, nested objects
+   indented) instead of one opaque JSON blob — the whole point is that
+   headline fields (a gate, a deliverables list) should be scannable, not
+   buried in brackets and quotes. */
+function humanizeKey(k){return String(k).replace(/_/g," ");}
+function renderValue(v){
+  if(v==null||v==="")return `<span class="muted">—</span>`;
+  if(Array.isArray(v)){
+    if(!v.length)return `<span class="muted">—</span>`;
+    return `<ul>${v.map(item=>`<li>${typeof item==="object"&&item!==null?esc(JSON.stringify(item)):esc(item)}</li>`).join("")}</ul>`;
+  }
+  if(typeof v==="object")return renderKV(v);
+  return esc(String(v));
+}
+function renderKV(obj){
+  const entries=Object.entries(obj||{});
+  if(!entries.length)return `<span class="muted">—</span>`;
+  return `<dl class="kv">${entries.map(([k,v])=>`<dt>${esc(humanizeKey(k))}</dt><dd>${renderValue(v)}</dd>`).join("")}</dl>`;
+}
 
 async function api(path,options){
   const r=await fetch(path,options&&options.body
@@ -311,17 +343,35 @@ async function loadExperimentDetail(slug){
 
   const writeup=experiment.latest_writeup;
   const hasDesign=experiment.design&&Object.keys(experiment.design).length;
-  const runsRows=(experiment.runs||[]).map(r=>`<tr><td><a href="#/runs/${encodeURIComponent(r.id)}" class="mono">${esc(r.slug)}</a></td><td>${pill(r.status)}</td><td>${esc(r.backend||"—")}</td><td>${fmtCost(r.cost_usd)}</td><td>${r.wandb_url?`<a href="${esc(r.wandb_url)}" target="_blank" rel="noopener">dashboard</a>`:"—"}</td></tr>`).join("")
+  const runs=experiment.runs||[];
+  const runsRows=runs.map(r=>`<tr><td><a href="#/runs/${encodeURIComponent(r.id)}" class="mono">${esc(r.slug)}</a></td><td>${pill(r.status)}</td><td>${esc(r.backend||"—")}</td><td>${fmtCost(r.cost_usd)}</td><td>${r.wandb_url?`<a href="${esc(r.wandb_url)}" target="_blank" rel="noopener">dashboard</a>`:"—"}</td></tr>`).join("")
     ||`<tr><td colspan="5" class="empty">No runs yet</td></tr>`;
+
+  /* The experiment list itself has no result columns, and finding out
+     "what happened" otherwise means opening every run individually — pull
+     each run's results in parallel and roll them into one table here. */
+  const resultsByRunId={};
+  await Promise.all(runs.map(async r=>{
+    try{resultsByRunId[r.id]=(await api(`/v1/runs/${encodeURIComponent(r.id)}`)).results||[];}
+    catch(e){/* best-effort */}
+  }));
+  const rollupRows=[];
+  runs.forEach(r=>{
+    (resultsByRunId[r.id]||[]).forEach(res=>{
+      const value=res.value!=null?esc(res.value):(res.value_json?esc(JSON.stringify(res.value_json)):"—");
+      rollupRows.push(`<tr><td><a href="#/runs/${encodeURIComponent(r.id)}" class="mono">${esc(r.slug)}</a></td><td>${esc(res.name)}</td><td>${value}</td><td>${esc(res.verdict||"—")}</td></tr>`);
+    });
+  });
 
   $("#app").innerHTML=`
     <p class="muted"><a href="#/experiments?programme=${encodeURIComponent(experiment.programme_slug)}">${esc(experiment.programme_name)}</a> / ${esc(experiment.slug)}</p>
     <h2>${esc(experiment.title)}</h2>
     <p>${pill(experiment.status)} ${(experiment.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</p>
     ${experiment.hypothesis?`<div class="card"><strong>Hypothesis</strong><p>${esc(experiment.hypothesis)}</p></div>`:""}
-    ${hasDesign?`<div class="card"><strong>Design</strong><pre>${esc(JSON.stringify(experiment.design,null,2))}</pre></div>`:""}
+    ${rollupRows.length?`<h3>Results</h3><table><tr><th>Run</th><th>Metric</th><th>Value</th><th>Verdict</th></tr>${rollupRows.join("")}</table>`:""}
     <h3>Write-up ${writeup?`<span class="muted">(v${writeup.version}, ${esc(writeup.author)})</span>`:""}</h3>
     ${writeup?`<div class="writeup">${writeup.body_html}</div>`:`<p class="empty">No write-up yet</p>`}
+    ${hasDesign?`<div class="card"><strong>Design</strong>${renderKV(experiment.design)}</div>`:""}
     <h3>Runs</h3>
     <table><tr><th>Run</th><th>Status</th><th>Backend</th><th>Cost</th><th>W&amp;B</th></tr>${runsRows}</table>
   `;
@@ -380,12 +430,12 @@ async function loadRunDetail(id){
       <tr><td class="muted">Ended</td><td>${fmtDt(run.ended_at)}</td></tr>
       ${run.claimed_by?`<tr><td class="muted">Claimed by</td><td>${esc(run.claimed_by)}</td></tr>`:""}
     </table></div>
-    ${hasConfig?`<div class="card"><strong>Config</strong><pre>${esc(JSON.stringify(run.config,null,2))}</pre></div>`:""}
-    ${hasWorkspec?`<div class="card"><strong>Workspec</strong><pre>${esc(JSON.stringify(run.workspec,null,2))}</pre></div>`:""}
     <h3>Results</h3>
     <table><tr><th>Name</th><th>Value</th><th>Verdict</th><th>Notes</th><th>By</th></tr>${resultsRows}</table>
     <h3>Artifacts</h3>
     <table><tr><th>Kind</th><th>Name</th><th>Location</th><th>Path</th><th></th></tr>${artifactsRows}</table>
+    ${hasConfig?`<div class="card"><strong>Config</strong>${renderKV(run.config)}</div>`:""}
+    ${hasWorkspec?`<div class="card"><strong>Workspec</strong>${renderKV(run.workspec)}</div>`:""}
   `;
 }
 
