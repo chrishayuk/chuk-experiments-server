@@ -117,6 +117,17 @@ def find_historical_run_id(client: httpx.Client, slug: str) -> str | None:
     return None
 
 
+def has_archive_artifact(client: httpx.Client, run_id: str, uri: str) -> bool:
+    """True if this run already has an artifact pointing at this exact
+    Drive folder — register_archive_artifact has no unique constraint to
+    lean on, so re-running the script (resumable by design, for the file
+    uploads) would otherwise register a fresh duplicate artifact row every
+    time, even though upload_directory correctly uploaded nothing new."""
+    resp = client.get(f"/v1/runs/{run_id}")
+    resp.raise_for_status()
+    return any(a["uri"] == uri for a in resp.json().get("artifacts", []))
+
+
 def register_archive_artifact(client: httpx.Client, run_id: str, folder_id: str, source_path: str) -> None:
     resp = client.post(
         f"/v1/runs/{run_id}/artifacts",
@@ -222,6 +233,7 @@ def run_archive(
         total_bytes += size
         print(f"  {path:60s} +{files} files, +{size:,} bytes -> {slugs}")
 
+        uri = f"{GDRIVE_URI_PREFIX}{folder_id}"
         for slug in slugs:
             run_id = find_historical_run_id(client, slug)
             if run_id is None:
@@ -229,6 +241,9 @@ def run_archive(
                     f"    ! expected DB record '{slug}' not found or has no historical run", file=sys.stderr
                 )
                 unlinked += 1
+                continue
+            if has_archive_artifact(client, run_id, uri):
+                linked += 1  # already linked by an earlier run of this script — nothing to do
                 continue
             register_archive_artifact(client, run_id, folder_id, path)
             linked += 1
