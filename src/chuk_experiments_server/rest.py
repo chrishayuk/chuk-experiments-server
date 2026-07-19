@@ -664,6 +664,18 @@ async def artifact_lineage(request: Request) -> Response:
     return _ok(await service.get_artifact_lineage(request.path_params["artifact_id"]))
 
 
+@mcp.endpoint("/v1/artifacts/{artifact_id:int}/verify", methods=["POST"])
+@_with_error_handling
+async def artifact_verify(request: Request) -> Response:
+    """Live-checks a git+/hf:// reference artifact and caches the result —
+    POST, not GET, since this makes an outbound network call and writes two
+    columns; not a cacheable read like lineage. See external_refs.py for why
+    this exists: a name match alone isn't enough (2026-07-19 larql
+    near-miss — an HF repo existed but was missing the real weight files)."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    return _ok(await service.verify_artifact(request.path_params["artifact_id"]))
+
+
 # ---------------------------------------------------------------------------
 # Pins — named, repointable aliases to a specific artifact (e.g.
 # "tok-v12-tokenizer:latest"), W&B-style.

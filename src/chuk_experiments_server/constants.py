@@ -182,13 +182,28 @@ R2_REGION = "auto"
 #: s3:// scheme, per ROADMAP.md's Google Drive archival phase.
 GDRIVE_URI_PREFIX = "gdrive://"
 
+#: Artifact URIs referencing a git commit or a Hugging Face Hub repo,
+#: instead of bytes uploaded through this server — see external_refs.py.
+#: `git+https://github.com/{owner}/{repo}@{commit}` (pip's VCS-URL
+#: convention) and `hf://model/{repo_id}@{revision}` /
+#: `hf://dataset/{repo_id}@{revision}`.
+GIT_URI_PREFIXES = ("git+https://", "git+http://", "git+ssh://")
+HF_URI_PREFIX = "hf://"
+
 #: register_artifact only accepts a uri that's already reachable in real
 #: storage — never a local file:// path or bare filesystem path, which is
 #: meaningless to anyone but the exact machine that registered it (and
 #: un-downloadable through /v1/artifacts/{id}/download). Local bytes go
 #: through upload_artifact_to_drive (small files) or the R2 presign flow
 #: (large checkpoints) instead — both hand back one of these prefixes.
-VALID_ARTIFACT_URI_PREFIXES = ("s3://", GDRIVE_URI_PREFIX, "https://", "http://")
+VALID_ARTIFACT_URI_PREFIXES = (
+    "s3://",
+    GDRIVE_URI_PREFIX,
+    "https://",
+    "http://",
+    *GIT_URI_PREFIXES,
+    HF_URI_PREFIX,
+)
 
 #: register_artifact accepts arbitrary caller-supplied `meta` (e.g. linking
 #: a checkpoint that already lives in another project's bucket, with that

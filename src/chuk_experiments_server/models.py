@@ -178,6 +178,11 @@ class Artifact(RecordModel):
     created_at: datetime
     name: str | None = None
     role: ArtifactRole = ArtifactRole.PRODUCED
+    #: Set only by service.verify_artifact (external_refs.py) for git+/hf://
+    #: reference artifacts — never caller-settable via ArtifactCreate.
+    verify_status: str | None = None
+    verified_at: datetime | None = None
+    verify_detail: str | None = None
 
 
 class ArtifactCreate(BaseModel):

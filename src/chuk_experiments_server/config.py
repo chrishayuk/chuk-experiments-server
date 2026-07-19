@@ -131,6 +131,21 @@ class Settings:
             and self.dashboard_allowed_email
         )
 
+    # --- External artifact reference verification (external_refs.py) --------
+    # Both optional: unauthenticated GitHub API access is 60 req/hr, which a
+    # personal access token (no scopes needed, just raises the rate limit)
+    # bumps to 5000/hr; unset works fine, just rate-limited. Hugging Face's
+    # public repo tree API needs no auth at all for public repos — this is
+    # only for verifying private ones.
+
+    @property
+    def github_token(self) -> str | None:
+        return os.environ.get("GITHUB_TOKEN")
+
+    @property
+    def huggingface_token(self) -> str | None:
+        return os.environ.get("HUGGINGFACE_TOKEN")
+
     # --- Internal API access (tools.py) --------------------------------------
     # MCP tools call this server's own REST API over HTTP rather than
     # service.py directly — see internal_client.py.

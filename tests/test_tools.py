@@ -91,6 +91,72 @@ async def test_register_artifact_lineage_and_pins(tool_caller):
     assert resolved["id"] == produced["id"]
 
 
+async def test_register_git_artifact_builds_uri_and_computed_meta(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    artifact = await tools.register_git_artifact(
+        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123", name="harness"
+    )
+    assert artifact["uri"] == "git+https://github.com/chrishayuk/chuk-mlx@abc123"
+    assert artifact["meta"]["git_repo"] == "chrishayuk/chuk-mlx"
+    assert artifact["meta"]["git_commit"] == "abc123"
+
+
+async def test_register_git_artifact_computed_meta_wins_over_caller_supplied(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    artifact = await tools.register_git_artifact(
+        run["id"],
+        owner="chrishayuk",
+        repo="chuk-mlx",
+        commit="abc123",
+        meta={"git_repo": "attacker/fake", "git_commit": "evil", "extra": "kept"},
+    )
+    assert artifact["meta"]["git_repo"] == "chrishayuk/chuk-mlx"
+    assert artifact["meta"]["git_commit"] == "abc123"
+    assert artifact["meta"]["extra"] == "kept"
+
+
+async def test_register_hf_artifact_builds_uri_and_computed_meta(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    artifact = await tools.register_hf_artifact(
+        run["id"],
+        repo_id="chrishayuk/granite-4.1-3b-q4k-vindex",
+        revision="main",
+        repo_type="model",
+        kind="checkpoint",
+        bytes=4_230_000_000,
+    )
+    assert artifact["uri"] == "hf://model/chrishayuk/granite-4.1-3b-q4k-vindex@main"
+    assert artifact["meta"]["hf_repo_id"] == "chrishayuk/granite-4.1-3b-q4k-vindex"
+    assert artifact["meta"]["hf_revision"] == "main"
+    assert artifact["meta"]["hf_repo_type"] == "model"
+    assert artifact["bytes"] == 4_230_000_000
+
+
+async def test_verify_artifact_tool_forwards_to_verify_route(tool_caller, monkeypatch):
+    from chuk_experiments_server import external_refs
+
+    async def _fake_verify_git_ref(*args, **kwargs):
+        return external_refs.VerifyResult("verified", "commit exists")
+
+    monkeypatch.setattr(external_refs, "verify_git_ref", _fake_verify_git_ref)
+
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    artifact = await tools.register_git_artifact(
+        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123"
+    )
+
+    result = await tools.verify_artifact(artifact["id"])
+    assert result["verify_status"] == "verified"
+    assert result["verify_detail"] == "commit exists"
+
+
 async def test_upload_artifacts_batch_forwards_and_dedups(tool_caller, monkeypatch):
     from chuk_experiments_server import drive_storage
     from chuk_experiments_server.config import settings

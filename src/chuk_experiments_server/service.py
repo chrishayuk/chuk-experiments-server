@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 
+from . import external_refs
 from .auth import AuthError, generate_key, hash_key
 from .constants import (
     CANCELLABLE_RUN_STATUSES,
@@ -25,6 +26,8 @@ from .constants import (
     EXPERIMENT_ID_PREFIX,
     EXPERIMENT_REF_SEQUENCE,
     EXPERIMENT_SORT_COLUMNS,
+    GIT_URI_PREFIXES,
+    HF_URI_PREFIX,
     ID_SEQUENCE_PAD_WIDTH,
     LEASABLE_RUN_STATUSES,
     MAX_LIST_LIMIT,
@@ -504,7 +507,7 @@ async def get_run(run_id: str) -> Run:
     data["artifacts"] = [
         dict(a)
         for a in await pool.fetch(
-            "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role "
+            "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail "
             "FROM artifact WHERE run_id = $1 ORDER BY created_at",
             run_id,
         )
@@ -786,7 +789,7 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
             """
             INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta, name, role)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
+            RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail
             """,
             run_id,
             data.kind.value,
@@ -815,12 +818,45 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
 async def get_artifact(artifact_id: int) -> Artifact:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role "
+        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail "
         "FROM artifact WHERE id = $1",
         artifact_id,
     )
     if row is None:
         raise NotFoundError(f"No artifact with id {artifact_id}")
+    return Artifact.model_validate(dict(row))
+
+
+async def verify_artifact(artifact_id: int) -> Artifact:
+    """Live-check that a git+/hf:// reference artifact still actually
+    resolves — not just well-formed, actually there (see external_refs.py's
+    module docstring for why "exists by name" isn't good enough). Writes
+    verify_status/verified_at so the result is cached, not re-checked on
+    every read (GitHub's unauthenticated API is 60 req/hr)."""
+    artifact = await get_artifact(artifact_id)
+    if artifact.uri.startswith(GIT_URI_PREFIXES):
+        host, owner, repo, commit = external_refs.parse_git_uri(artifact.uri)
+        result = await external_refs.verify_git_ref(host, owner, repo, commit)
+    elif artifact.uri.startswith(HF_URI_PREFIX):
+        repo_type, repo_id, revision = external_refs.parse_hf_uri(artifact.uri)
+        result = await external_refs.verify_hf_ref(repo_type, repo_id, revision, artifact.bytes)
+    else:
+        raise ValidationError(
+            f"Artifact {artifact_id} isn't a git+/hf:// reference (uri: {artifact.uri!r}) — "
+            "verify only applies to those two kinds."
+        )
+
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE artifact SET verify_status = $1, verified_at = now(), verify_detail = $2
+        WHERE id = $3
+        RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail
+        """,
+        result.status,
+        result.detail,
+        artifact_id,
+    )
     return Artifact.model_validate(dict(row))
 
 
@@ -849,7 +885,7 @@ async def find_checkpoints(
     limit_param = bind(limit)
     rows = await pool.fetch(
         f"""
-        SELECT a.id, a.run_id, a.kind, a.uri, a.bytes, a.sha256, a.meta, a.created_at, a.name, a.role
+        SELECT a.id, a.run_id, a.kind, a.uri, a.bytes, a.sha256, a.meta, a.created_at, a.name, a.role, a.verify_status, a.verified_at, a.verify_detail
         FROM artifact a
         JOIN run r ON r.id = a.run_id
         JOIN experiment e ON e.id = r.experiment_id
@@ -870,7 +906,7 @@ async def find_artifact_by_name_sha(name: str, sha256: str) -> Artifact | None:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role
+        SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail
         FROM artifact
         WHERE name = $1 AND sha256 = $2
         ORDER BY (role = 'produced') DESC, created_at ASC

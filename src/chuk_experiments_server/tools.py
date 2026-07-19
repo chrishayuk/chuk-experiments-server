@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from . import auth, internal_client
+from . import auth, external_refs, internal_client
 from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT
 from .server import mcp
 
@@ -398,6 +398,109 @@ async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> An
     Returns a list of created artifacts, in the same order as items.
     """
     return await _api_request("POST", f"/v1/runs/{run_id}/artifacts/upload-batch", json={"items": items})
+
+
+@mcp.tool
+async def register_git_artifact(
+    run_id: str,
+    owner: str,
+    repo: str,
+    commit: str,
+    kind: str = "other",
+    name: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> Any:
+    """Record that a run's harness/code IS a git commit — for when the code
+    already lives in a GitHub repo, so there's no reason to re-upload it as
+    a Drive file. Registers `git+https://github.com/{owner}/{repo}@{commit}`
+    (no bytes ever move) with `meta.git_repo`/`meta.git_commit` set for the
+    dashboard, matching what you'd get from `git rev-parse HEAD` and your
+    remote's owner/repo in the harness's own working directory.
+
+    Call verify_artifact on the returned id any time you want to confirm
+    the commit still actually exists on GitHub (e.g. before trusting it as
+    a citation) rather than assuming registration alone means it's real.
+
+    Args:
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
+        owner: GitHub org/user (e.g. "chrishayuk")
+        repo: Repo name (e.g. "chuk-mlx")
+        commit: Full commit SHA the harness ran at
+        kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other) — usually "other" for code
+        name: Logical name for dedup/lineage across runs (e.g. "tok-v12-harness")
+        meta: Additional metadata — git_repo/git_commit are always set from
+            owner/repo/commit and win over any caller-supplied values of the same keys
+    """
+    uri = external_refs.build_git_uri(owner, repo, commit)
+    computed_meta = {**(meta or {}), "git_repo": f"{owner}/{repo}", "git_commit": commit}
+    body = {"kind": kind, "uri": uri, "name": name, "meta": computed_meta}
+    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+
+
+@mcp.tool
+async def register_hf_artifact(
+    run_id: str,
+    repo_id: str,
+    revision: str = "main",
+    repo_type: str = "model",
+    kind: str = "other",
+    bytes: int | None = None,
+    name: str | None = None,
+    meta: dict[str, Any] | None = None,
+) -> Any:
+    """Record that a run's checkpoint/dataset IS already a Hugging Face Hub
+    repo — for when the artifact already lives on the Hub, so there's no
+    reason to re-upload it. Registers `hf://{repo_type}/{repo_id}@{revision}`
+    (no bytes ever move) with `meta.hf_repo_id`/`meta.hf_revision`/
+    `meta.hf_repo_type` set for the dashboard.
+
+    Pass bytes (the total expected size of the repo at this revision, if
+    you know it) to make verify_artifact's check meaningful beyond "the
+    revision exists" — a 2026-07-19 disk-reclaim audit found an HF repo
+    that matched by name but was missing 93% of its actual content (2.6GB
+    of an expected 36.5GB); only a real size check caught it, not the fact
+    the repo/revision existed.
+
+    Args:
+        run_id: Run id (e.g. "RUN-20260718-160217-00397")
+        repo_id: Hub repo id (e.g. "chrishayuk/granite-4.1-3b-q4k-vindex")
+        revision: Branch/tag/commit on the Hub (default "main")
+        repo_type: "model" or "dataset"
+        kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other) — usually "checkpoint" or "dataset"
+        bytes: Expected total size in bytes, if known — enables verify_artifact's
+            completeness check instead of existence-only
+        name: Logical name for dedup/lineage across runs
+        meta: Additional metadata — hf_repo_id/hf_revision/hf_repo_type are
+            always set from repo_id/revision/repo_type and win over any
+            caller-supplied values of the same keys
+    """
+    uri = external_refs.build_hf_uri(repo_type, repo_id, revision)
+    computed_meta = {
+        **(meta or {}),
+        "hf_repo_id": repo_id,
+        "hf_revision": revision,
+        "hf_repo_type": repo_type,
+    }
+    body = {"kind": kind, "uri": uri, "bytes": bytes, "name": name, "meta": computed_meta}
+    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+
+
+@mcp.tool
+async def verify_artifact(artifact_id: int) -> Any:
+    """Live-check that a git+/hf:// reference artifact (from
+    register_git_artifact/register_hf_artifact) still actually resolves —
+    the commit/revision exists, and for hf:// with a recorded expected
+    size, the real content is actually complete. Not just "was this
+    well-formed at registration time": repos get deleted, revisions get
+    force-pushed away, uploads get abandoned partway through. Result is
+    cached (verify_status/verified_at/verify_detail on the artifact), not
+    re-checked on every read, since GitHub's unauthenticated API is capped
+    at 60 requests/hour.
+
+    Args:
+        artifact_id: Artifact id (from register_git_artifact/register_hf_artifact's response)
+    """
+    return await _api_request("POST", f"/v1/artifacts/{artifact_id}/verify")
 
 
 @mcp.tool

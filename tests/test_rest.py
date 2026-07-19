@@ -309,6 +309,111 @@ async def test_register_artifact(api_client, write_key):
     assert resp.status_code == HTTPStatus.CREATED
 
 
+async def test_register_artifact_accepts_git_uri(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts",
+        json={
+            "kind": "other",
+            "uri": "git+https://github.com/chrishayuk/chuk-mlx@abc123",
+            "meta": {"git_repo": "chrishayuk/chuk-mlx", "git_commit": "abc123"},
+        },
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+
+
+async def test_register_artifact_accepts_hf_uri(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts",
+        json={"kind": "checkpoint", "uri": "hf://model/chrishayuk/granite-4.1-3b-q4k-vindex@main"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+
+
+def _mock_verify(monkeypatch, status="verified", detail="ok"):
+    from chuk_experiments_server import external_refs
+
+    async def _fake_verify_git_ref(*args, **kwargs):
+        return external_refs.VerifyResult(status, detail)
+
+    async def _fake_verify_hf_ref(*args, **kwargs):
+        return external_refs.VerifyResult(status, detail)
+
+    monkeypatch.setattr(external_refs, "verify_git_ref", _fake_verify_git_ref)
+    monkeypatch.setattr(external_refs, "verify_hf_ref", _fake_verify_hf_ref)
+
+
+async def test_artifact_verify_writes_status_and_returns_artifact(api_client, write_key, monkeypatch):
+    _mock_verify(monkeypatch, status="verified", detail="commit exists")
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "other", "uri": "git+https://github.com/chrishayuk/chuk-mlx@abc123"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.post(f"/v1/artifacts/{artifact_id}/verify", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    body = resp.json()
+    assert body["verify_status"] == "verified"
+    assert body["verify_detail"] == "commit exists"
+    assert body["verified_at"] is not None
+
+
+async def test_artifact_verify_dispatches_hf_uri_to_hf_verify(api_client, write_key, monkeypatch):
+    _mock_verify(monkeypatch, status="missing", detail="only 2.6GB of 36.5GB present")
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "checkpoint", "uri": "hf://model/chrishayuk/granite-4.1-30b-q4k-vindex@main"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.post(f"/v1/artifacts/{artifact_id}/verify", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json()["verify_status"] == "missing"
+
+
+async def test_artifact_verify_rejects_non_reference_artifact(api_client, write_key, monkeypatch):
+    _mock_verify(monkeypatch)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "checkpoint", "uri": "s3://bucket/ckpt.bin"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.post(f"/v1/artifacts/{artifact_id}/verify", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+async def test_artifact_verify_404_on_unknown_id(api_client, write_key, monkeypatch):
+    _mock_verify(monkeypatch)
+    resp = await api_client.post("/v1/artifacts/999999/verify", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.NOT_FOUND
+
+
+async def test_artifact_verify_requires_write_scope(api_client, monkeypatch):
+    _mock_verify(monkeypatch)
+    await auth_module.upsert_bootstrap_key("readonly:read:readonly-verify-key")
+    resp = await api_client.post("/v1/artifacts/1/verify", headers=_auth("readonly-verify-key"))
+    assert resp.status_code == HTTPStatus.FORBIDDEN
+
+
 async def test_artifacts_presign_not_configured(api_client, write_key, monkeypatch):
     # R2 is genuinely configured in this dev environment's .env — force the
     # "not configured" branch deterministically rather than relying on ambient state.
