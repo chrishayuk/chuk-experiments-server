@@ -411,7 +411,13 @@ code before fixing, each verified with a new regression test:
      for `chuk-mlx` — so this fits the existing model without a redesign).
 2. **gpu-training-harness queue integration** (Task 21) — wire the harness's
    run lifecycle into this server's `/v1/queue` contract. Explicitly
-   sequenced after the dashboard was fully live, which it now is.
+   sequenced after the dashboard was fully live, which it now is. **Push
+   direction done (2026-07-20, in gpu-training-harness)**: its own
+   `submit_run_from_experiment` fetches an existing `RUN-…`'s `config`/
+   `workspec` from here and submits it attached, one call instead of
+   re-specifying the training job by hand — see that repo's ROADMAP.md. What
+   remains is **pull**: the harness itself polling `/v1/queue` and
+   self-selecting eligible work, rather than being told which run to run.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
 
 ## New features under consideration (2026-07-19)
