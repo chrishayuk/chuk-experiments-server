@@ -200,8 +200,30 @@ async def create_experiment(
         title: Short human-readable title
         slug: Unique experiment slug (e.g. "cn-11") — auto-generated
             (e.g. "EXP-20260718-160217-00397") when omitted
-        hypothesis: What we expect and why
-        design: Model/dataset/params/arms as a JSON object
+        hypothesis: A single, falsifiable claim in plain language — what you
+            expect to observe and why, not an inventory of every
+            component/artifact the run touches (that belongs in `design`,
+            not here). One to three sentences, written so someone with zero
+            context on this run's internal jargon/acronyms can still tell
+            what's being tested and what result would prove it wrong.
+
+            Bad (a real case this caused): "A fully pinned, model-free
+            harness — target sets, MSI frame battery + canonicalizer
+            (Python+Rust), parity corpus, blind D4 call set, shadow-lane
+            configs, five-way census taxonomy, TEG uncertainty policy,
+            panel-adjudication table — committed before any candidate
+            trains eliminates post-hoc discretion..." — this lists what was
+            built, not a claim; nothing in it is falsifiable, and a reader
+            has to decode eight acronyms before reaching any actual idea.
+
+            Good: "Freezing every scoring decision (target sets,
+            calibration corpus, adjudication rules) before training any
+            tokenizer candidate will prevent the kind of post-hoc
+            rule-bending that inflated the previous version's reported win
+            margin." — one mechanism, one prediction, no undefined jargon.
+        design: Model/dataset/params/arms as a JSON object — this is where
+            harness components, acronyms, and configuration inventories
+            belong, not in `hypothesis`
     """
     body = {
         "programme": programme,
@@ -239,7 +261,17 @@ async def append_writeup(slug: str, body_md: str) -> Any:
 
     Args:
         slug: Experiment slug
-        body_md: Full write-up body in markdown
+        body_md: Write-up body in markdown, written for a reader who wasn't
+            in the room. Lead with the verdict in one plain-language
+            sentence before any internal jargon or acronyms — a reader
+            should know whether this closed positive, negative, or
+            inconclusive from the first line, not have to parse the whole
+            thing to find out. Define any abbreviation the first time it's
+            used. Separate what was done, what was found, and what it
+            means into distinct sections rather than one dense paragraph —
+            the same failure mode that makes a hypothesis unreadable
+            (jargon crammed together with no claim) makes a write-up
+            unreadable too.
     """
     return await _api_request("POST", f"/v1/experiments/{slug}/writeups", json={"body_md": body_md})
 
