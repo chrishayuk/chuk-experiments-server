@@ -934,17 +934,29 @@ async def get_artifact_lineage(artifact_id: int) -> ArtifactLineage:
     """Every artifact sharing this one's (name, sha256) is the same content
     — one PRODUCED it (the original upload), any others USED it (a dedup
     hit from a later run). Falls out of grouping existing rows, no
-    separate lineage table needed."""
+    separate lineage table needed.
+
+    git+/hf:// reference artifacts never have a sha256 (no bytes were ever
+    hashed — the commit/revision in the uri itself is the content address),
+    so for those the same grouping happens on (name, uri) instead, matching
+    idx_artifact_produced_name_uri_unique's dedup key."""
     artifact = await get_artifact(artifact_id)
-    if not artifact.name or not artifact.sha256:
+    if not artifact.name:
         return ArtifactLineage(produced_by_run_id=None, used_by_run_ids=[])
 
     pool = await get_pool()
-    rows = await pool.fetch(
-        "SELECT run_id, role FROM artifact WHERE name = $1 AND sha256 = $2 ORDER BY created_at",
-        artifact.name,
-        artifact.sha256,
-    )
+    if artifact.sha256:
+        rows = await pool.fetch(
+            "SELECT run_id, role FROM artifact WHERE name = $1 AND sha256 = $2 ORDER BY created_at",
+            artifact.name,
+            artifact.sha256,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT run_id, role FROM artifact WHERE name = $1 AND uri = $2 AND sha256 IS NULL ORDER BY created_at",
+            artifact.name,
+            artifact.uri,
+        )
     produced_by = next((r["run_id"] for r in rows if r["role"] == "produced"), None)
     used_by = [r["run_id"] for r in rows if r["role"] == "used"]
     return ArtifactLineage(produced_by_run_id=produced_by, used_by_run_ids=used_by)

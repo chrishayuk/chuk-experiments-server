@@ -176,6 +176,54 @@ async def test_get_artifact_lineage_empty_for_unnamed_artifact():
     assert lineage.used_by_run_ids == []
 
 
+async def test_register_git_artifact_dedups_by_name_and_uri_when_no_sha256():
+    """git+/hf:// reference artifacts never carry a sha256 — the commit/
+    revision in the uri itself is the content address, so dedup and
+    lineage must key on (name, uri) instead of (name, sha256) for these."""
+    await _make_experiment()
+    run_a = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
+    git_uri = "git+https://github.com/chrishayuk/chuk-mlx@abc123"
+
+    produced = await service.register_artifact(
+        run_a.id, ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced")
+    )
+    used = await service.register_artifact(
+        run_b.id, ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced")
+    )
+
+    assert produced.role == "produced"
+    assert used.role == "used"
+
+    lineage = await service.get_artifact_lineage(produced.id)
+    assert lineage.produced_by_run_id == run_a.id
+    assert lineage.used_by_run_ids == [run_b.id]
+
+
+async def test_register_git_artifact_different_uri_same_name_both_produced():
+    """Different commits under the same name are genuinely different
+    content — the (name, uri) dedup key must not conflate them."""
+    await _make_experiment()
+    run_a = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
+
+    first = await service.register_artifact(
+        run_a.id,
+        ArtifactCreate(
+            kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@commit1", name="harness"
+        ),
+    )
+    second = await service.register_artifact(
+        run_b.id,
+        ArtifactCreate(
+            kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@commit2", name="harness"
+        ),
+    )
+
+    assert first.role == "produced"
+    assert second.role == "produced"
+
+
 async def test_pin_set_get_list_and_repoint():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
