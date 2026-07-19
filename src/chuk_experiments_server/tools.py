@@ -214,6 +214,26 @@ async def create_experiment(
 
 
 @mcp.tool
+async def update_experiment_status(slug: str, status: str, tags: list[str] | None = None) -> Any:
+    """Update an experiment's own lifecycle status — separate from any of
+    its runs' statuses, and nothing flips it automatically: an experiment
+    stays "planned" forever unless something calls this, even while its
+    runs are actively running or completed. Call this when real work
+    starts (-> "running") and when it wraps up (-> "completed"), the same
+    way set_run_status keeps a run's own status current.
+
+    Args:
+        slug: Experiment slug (e.g. "cn-7")
+        status: draft/planned/running/completed/abandoned/superseded
+        tags: Optional replacement tag list (omit to leave tags unchanged)
+    """
+    body: dict[str, Any] = {"status": status}
+    if tags is not None:
+        body["tags"] = tags
+    return await _api_request("PATCH", f"/v1/experiments/{slug}", json=body)
+
+
+@mcp.tool
 async def append_writeup(slug: str, body_md: str) -> Any:
     """Append a new write-up version to an experiment (author is the calling API key's identity).
 

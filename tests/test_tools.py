@@ -133,6 +133,16 @@ async def test_set_run_status(tool_caller):
     assert updated["status"] == "completed"
 
 
+async def test_update_experiment_status(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    updated = await tools.update_experiment_status("cn-7", "running")
+    assert updated["status"] == "running"
+
+    retagged = await tools.update_experiment_status("cn-7", "completed", tags=["done"])
+    assert retagged["status"] == "completed"
+    assert retagged["tags"] == ["done"]
+
+
 async def test_cancel_run(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})
