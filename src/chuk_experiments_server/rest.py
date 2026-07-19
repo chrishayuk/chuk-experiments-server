@@ -29,6 +29,8 @@ from .constants import (
     DEFAULT_LIST_LIMIT,
     DEFAULT_SEARCH_LIMIT,
     GDRIVE_URI_PREFIX,
+    GIT_URI_PREFIXES,
+    HF_URI_PREFIX,
     MAX_LIST_LIMIT,
     PRESIGN_PUT_EXPIRY_SECONDS,
     TRUSTED_DRIVE_URL_PREFIX,
@@ -649,6 +651,17 @@ async def artifact_download(request: Request) -> Response:
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             )
         return RedirectResponse(drive_url, status_code=HTTPStatus.FOUND.value)
+
+    if artifact.uri.startswith(GIT_URI_PREFIXES) or artifact.uri.startswith(HF_URI_PREFIX):
+        # There's no single file to download for a git commit or an HF Hub
+        # revision — the dashboard renders a real github.com/huggingface.co
+        # link from meta instead (see app.html); this route just needs to
+        # say so clearly rather than falling through to storage.key_from_uri
+        # and raising an unhandled ValueError.
+        return JSONResponse(
+            {"error": "artifact is a git+/hf:// reference, not a single downloadable file — see its meta"},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
 
     if not settings.r2_configured:
         return JSONResponse(_R2_NOT_CONFIGURED, status_code=HTTPStatus.NOT_IMPLEMENTED.value)

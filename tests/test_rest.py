@@ -446,6 +446,36 @@ async def test_artifact_download_not_configured(api_client, write_key, monkeypat
     assert resp.status_code == HTTPStatus.NOT_IMPLEMENTED
 
 
+async def test_artifact_download_rejects_git_reference_with_clear_400(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "other", "uri": "git+https://github.com/chrishayuk/chuk-mlx@abc123"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.get(f"/v1/artifacts/{artifact_id}/download", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
+async def test_artifact_download_rejects_hf_reference_with_clear_400(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    artifact_id = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/artifacts",
+            json={"kind": "checkpoint", "uri": "hf://model/chrishayuk/some-model@main"},
+            headers=_auth(write_key),
+        )
+    ).json()["id"]
+
+    resp = await api_client.get(f"/v1/artifacts/{artifact_id}/download", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+
+
 async def test_artifacts_presign_configured(api_client, write_key, monkeypatch):
     """storage.presign_put itself isn't exercised here (that's real
     boto3/R2-credential territory, not this route's job) — mocked so the test
