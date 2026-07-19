@@ -78,8 +78,57 @@ decisions made along the way that the spec didn't originally cover.
   nuance preserved as tags.
 - CI/CD (GitHub Actions): lint+test on every push/PR, continuous deploy to
   Fly on push to `main` gated on tests passing.
-- 90%+ test coverage per file (98% overall, 256 tests), `ruff check`/`ruff
+- 90%+ test coverage per file (98% overall, 296 tests), `ruff check`/`ruff
   format` clean across the repo.
+- **Google Drive artifact upload + sortable/filterable Experiments list** —
+  `POST /runs/{id}/artifacts/upload` uploads local bytes straight to Drive
+  and registers the resulting `gdrive://` artifact, for the small
+  provenance/config/log/dataset files an agent has bytes for right now
+  (large checkpoints still go through R2's presign flow, bytes never
+  transiting this server). `register_artifact` rejects `file://` and bare
+  local paths outright — the bug that prompted this whole pass: 11 real
+  TOK-0 artifacts had been silently recorded as unusable local paths.
+  Experiments list gained `sort`/`order` query params, clickable sortable
+  column headers, and chuk-train-style instant-apply status filter chips
+  (replacing a dropdown+button).
+- **Content-addressed artifact dedup, lineage, and pins** — artifacts gain
+  an optional `name` and a `role` (`produced`/`used`); uploading the same
+  `(name, sha256)` content again (a harness/dataset reused across many
+  runs) reuses the original Drive file instead of re-uploading, tagging
+  the reuse `role=used`. `GET /artifacts/{id}/lineage` reports which run
+  produced a piece of content and which runs have since reused it — no
+  separate graph table, it falls out of grouping by `(name, sha256, role)`.
+  `artifact_pin` (`migrations/004_artifact_lineage.sql`) gives W&B-style
+  named, repointable aliases (`PUT /pins/{name}`, e.g.
+  `"tok-v12-tokenizer:latest"`). Both are dashboard-visible: run-detail
+  shows a Name column with a "used by N other runs" note and any
+  "pinned as ..." badges; a new global **Pins** screen lists every pin
+  with its current target (run/kind/uri). `POST .../upload-batch` (+ the
+  `upload_artifacts_batch` MCP tool) uploads several files in one round
+  trip instead of one MCP call per file, each item still deduping
+  independently — added after real v12-tokenizer usage made the
+  per-file round-trip cost (base64 transit + decode/hash/upload/insert,
+  repeated per file) a real, felt friction point.
+- **`update_experiment_status` MCP tool** — `set_run_status` let an agent
+  keep a *run's* status current, but nothing on the MCP surface could ever
+  update an *experiment's* own status (only the REST `PATCH` route
+  existed). Since nothing links the two automatically, every experiment
+  created via MCP was stuck at whatever status it was created with
+  forever — caught because the entire v12-tokenizer programme sat at
+  "planned" in the dashboard despite TOK-0 actively running.
+- **Results/design readability pass** — an experiment's runs table had no
+  result columns at all, and run-detail buried its own Results table below
+  two raw JSON dumps (config, workspec) — the actual outcome was the least
+  visible thing on either page. Experiment detail now rolls up every run's
+  results (run/metric/value/verdict) right after the hypothesis; run-detail
+  moves Results/Artifacts above Config/Workspec; `design`/`config`/
+  `workspec` render as labeled key/value sections (`renderKV`) instead of
+  one opaque JSON blob.
+- Dashboard Team screen shows the server's MCP URL and a `claude mcp add`
+  template, and fills in a ready-to-copy connect command (real key
+  substituted in, one-click copy) the moment a new key is generated —
+  there was previously no in-app guidance on how to actually connect an
+  MCP client at all.
 
 ## Next
 
@@ -93,7 +142,17 @@ decisions made along the way that the spec didn't originally cover.
      (896/898 files; the 2 unarchived are `.pyc` bytecode caches, a
      deliberate exclusion), local copy reclaimed.
    - `chris-experiments/` (~19G) — **in progress**, running against
-     production.
+     production. Root-caused a silent 194-file gap: the old catch-all only
+     covered whole top-level directories with zero `INDEX.md` `Path:`
+     references, missing root-level loose files and unindexed content
+     sitting next to a programme dir's real (Path-referenced) experiment
+     subdirectories (e.g. `grammar/data/`) — replaced with a single
+     residual catch-all pass, verified byte-for-byte against the real
+     checkout. Also found and fixed a separate bug while re-running it:
+     artifact registration had no idempotency check, so 3 earlier runs had
+     left 306 exact duplicate artifact rows in production (153 directories
+     × 2 extra copies) — deduped directly, and the script now checks for
+     an existing matching artifact before registering.
    - `larql/output/` (252G) and `cell80/experiments/` (~20G, a 5th
      experiment tree never onboarded as DB metadata at all) are explicit,
      separate later decisions — not bundled into the first pass.
