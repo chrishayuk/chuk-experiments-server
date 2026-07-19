@@ -154,6 +154,8 @@ async def experiments_collection(request: Request) -> Response:
             status=params.get("status"),
             tags=params.getlist("tag") or None,
             q=params.get("q"),
+            needs_conclusion=params.get("needs_conclusion") == "true",
+            needs_next_action=params.get("needs_next_action") == "true",
             limit=_parse_limit(params.get("limit"), DEFAULT_LIST_LIMIT),
             offset=_parse_offset(params.get("offset")),
             sort=params.get("sort", DEFAULT_EXPERIMENT_SORT),
@@ -164,6 +166,16 @@ async def experiments_collection(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)
     data = ExperimentCreate.model_validate(await request.json())
     return _ok(await service.create_experiment(data), status=HTTPStatus.CREATED)
+
+
+# /v1/experiments/health must be registered before /v1/experiments/{slug} —
+# routes are matched in registration order, so "health" would otherwise be
+# swallowed as a slug (same gotcha /v1/runs/compare has against {run_id}).
+@mcp.endpoint("/v1/experiments/health", methods=["GET"])
+@_with_error_handling
+async def experiments_health(request: Request) -> Response:
+    await auth.require_scope_from_request(request, Scope.READ)
+    return _ok(await service.get_research_health())
 
 
 @mcp.endpoint("/v1/experiments/{slug}", methods=["GET", "PATCH"])

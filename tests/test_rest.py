@@ -119,6 +119,40 @@ async def test_patch_experiment_updates_status(api_client, write_key):
     assert resp.json()["status"] == "completed"
 
 
+async def test_patch_experiment_updates_conclusion_and_next_action(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    resp = await api_client.patch(
+        "/v1/experiments/cn-7",
+        json={"conclusion": "Refuted.", "next_action": "Close out."},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json()["conclusion"] == "Refuted."
+    assert resp.json()["next_action"] == "Close out."
+
+
+async def test_list_experiments_filters_by_needs_conclusion(api_client, write_key):
+    await _create_experiment(api_client, write_key, slug="cn-7", status="completed")
+    await _create_experiment(api_client, write_key, slug="cn-8", status="completed")
+    await api_client.patch(
+        "/v1/experiments/cn-8", json={"conclusion": "Supported."}, headers=_auth(write_key)
+    )
+
+    resp = await api_client.get(
+        "/v1/experiments", params={"needs_conclusion": "true"}, headers=_auth(write_key)
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert [e["slug"] for e in resp.json()] == ["cn-7"]
+
+
+async def test_experiments_health_endpoint(api_client, write_key):
+    await _create_experiment(api_client, write_key, slug="cn-7", status="completed")
+
+    resp = await api_client.get("/v1/experiments/health", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json() == {"needs_conclusion": 1, "needs_next_action": 0}
+
+
 async def test_list_experiments_filters_by_programme(api_client, write_key):
     await _create_experiment(api_client, write_key, programme="cn", slug="cn-7")
     await _create_experiment(api_client, write_key, programme="div", slug="div-3")

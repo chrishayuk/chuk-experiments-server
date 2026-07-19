@@ -233,6 +233,26 @@ decisions made along the way that the spec didn't originally cover.
   guidance). Rewrote both docstrings with a concrete bad/good example —
   the one thing every calling agent actually reads, every time, unlike a
   skill, which only helps if explicitly invoked.
+- **`conclusion`/`next_action` fields on experiment** (2026-07-19) — the
+  gap identified by a long strategic review of where this project should
+  go: `hypothesis` captures the plan written before a run, but nothing
+  captured what was actually concluded afterward, or what should happen
+  next, so a finished experiment risked becoming "a cleaner warehouse for
+  the same sprawl." Deliberately kept to the plain-text shape of
+  `hypothesis` (migration 009) rather than a richer `Conclusion`
+  object/verdict-enum/evidence-graph design also considered and explicitly
+  rejected as more machinery than a personal research tracker needs. New
+  `record_experiment_conclusion` MCP tool (separate from
+  `update_experiment_status` — narrative vs. lifecycle, mirroring the
+  existing `append_writeup`/`update_experiment_status` split), with a
+  docstring in the same rigor as the recently-rewritten
+  `create_experiment`/`append_writeup` ones: a good conclusion opens with
+  the verdict in plain language, a good next action is concrete, not
+  "investigate further." Overview screen gets two new clickable tiles
+  ("Needs conclusion" / "Needs next action", backed by a new
+  `GET /v1/experiments/health`) — a first, deliberately minimal cut at the
+  "research going stale" signal the same review proposed, without building
+  the fuller research-debt screen it also described.
 
 ## Fixed (found via code review, 2026-07-19)
 

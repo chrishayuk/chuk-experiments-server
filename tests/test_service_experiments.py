@@ -71,6 +71,67 @@ async def test_update_experiment_missing_raises_not_found():
         await service.update_experiment("does-not-exist", ExperimentUpdate(status=ExperimentStatus.COMPLETED))
 
 
+async def test_update_experiment_conclusion_and_next_action():
+    await service.create_experiment(_experiment_create())
+    updated = await service.update_experiment(
+        "cn-7", ExperimentUpdate(conclusion="Refuted: no effect observed.", next_action="Close out.")
+    )
+    assert updated.conclusion == "Refuted: no effect observed."
+    assert updated.next_action == "Close out."
+
+    # Omitted fields on a later PATCH must not clobber what's already set.
+    reloaded = await service.update_experiment("cn-7", ExperimentUpdate(tags=["done"]))
+    assert reloaded.conclusion == "Refuted: no effect observed."
+    assert reloaded.next_action == "Close out."
+
+
+async def test_list_experiments_filters_needs_conclusion():
+    await service.create_experiment(
+        _experiment_create(slug="cn-done-no-conclusion", status=ExperimentStatus.COMPLETED)
+    )
+    await service.create_experiment(
+        _experiment_create(slug="cn-done-with-conclusion", status=ExperimentStatus.COMPLETED)
+    )
+    await service.update_experiment("cn-done-with-conclusion", ExperimentUpdate(conclusion="Supported."))
+    await service.create_experiment(
+        _experiment_create(slug="cn-still-running", status=ExperimentStatus.RUNNING)
+    )
+
+    needing = await service.list_experiments(needs_conclusion=True)
+    assert [e.slug for e in needing] == ["cn-done-no-conclusion"]
+
+
+async def test_list_experiments_filters_needs_next_action():
+    await service.create_experiment(
+        _experiment_create(slug="cn-planned-no-action", status=ExperimentStatus.PLANNED)
+    )
+    await service.create_experiment(
+        _experiment_create(slug="cn-running-no-action", status=ExperimentStatus.RUNNING)
+    )
+    await service.create_experiment(
+        _experiment_create(slug="cn-running-with-action", status=ExperimentStatus.RUNNING)
+    )
+    await service.update_experiment("cn-running-with-action", ExperimentUpdate(next_action="Try TOK-14."))
+    await service.create_experiment(
+        _experiment_create(slug="cn-done-no-action", status=ExperimentStatus.COMPLETED)
+    )
+
+    needing = await service.list_experiments(needs_next_action=True)
+    assert sorted(e.slug for e in needing) == ["cn-planned-no-action", "cn-running-no-action"]
+
+
+async def test_get_research_health_counts():
+    await service.create_experiment(
+        _experiment_create(slug="cn-done-no-conclusion", status=ExperimentStatus.COMPLETED)
+    )
+    await service.create_experiment(
+        _experiment_create(slug="cn-planned-no-action", status=ExperimentStatus.PLANNED)
+    )
+
+    health = await service.get_research_health()
+    assert health == {"needs_conclusion": 1, "needs_next_action": 1}
+
+
 async def test_list_experiments_filters_by_programme_and_status():
     await service.create_experiment(_experiment_create(programme="cn", slug="cn-7"))
     await service.create_experiment(

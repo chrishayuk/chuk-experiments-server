@@ -221,6 +221,15 @@ async def test_update_experiment_status(tool_caller):
     assert retagged["tags"] == ["done"]
 
 
+async def test_record_experiment_conclusion(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    updated = await tools.record_experiment_conclusion(
+        "cn-7", conclusion="Refuted.", next_action="Close out."
+    )
+    assert updated["conclusion"] == "Refuted."
+    assert updated["next_action"] == "Close out."
+
+
 async def test_cancel_run(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})

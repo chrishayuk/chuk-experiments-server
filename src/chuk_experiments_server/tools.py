@@ -277,6 +277,43 @@ async def append_writeup(slug: str, body_md: str) -> Any:
 
 
 @mcp.tool
+async def record_experiment_conclusion(
+    slug: str, conclusion: str | None = None, next_action: str | None = None
+) -> Any:
+    """Record what an experiment established and what should happen next —
+    separate from update_experiment_status (that's lifecycle: draft/planned/
+    running/completed/... this is narrative: what did we learn, what now).
+    Call this once real analysis is done, alongside or shortly after your
+    final update_experiment_status(status="completed") / write-up.
+
+    Args:
+        slug: Experiment slug (e.g. "cn-7")
+        conclusion: What this experiment established, in plain language.
+            Open with the verdict relative to the hypothesis — supported,
+            refuted, mixed, or inconclusive — before any detail, then say
+            why in a sentence or two. Bad: restating the method ("ran the
+            sweep across 5 configs"). Good: "Refuted: increasing vocabulary
+            size alone did not close the Rust family-held-out gap — the
+            gap tracks a specific missing token class, not vocabulary
+            coverage in general." Omit to leave the existing conclusion
+            unchanged.
+        next_action: What should happen next, or why work stopped here —
+            concrete enough that reading it in six months tells you
+            exactly what to do. Bad: "investigate further." Good: "Try
+            TOK-14: matched vocabulary with/without structural numeral
+            encoding, to isolate whether the gap is numeral-specific" or
+            "Park — superseded by cn-9's cleaner replication" or "Closed,
+            refuted; no follow-up planned." Omit to leave unchanged.
+    """
+    body: dict[str, Any] = {}
+    if conclusion is not None:
+        body["conclusion"] = conclusion
+    if next_action is not None:
+        body["next_action"] = next_action
+    return await _api_request("PATCH", f"/v1/experiments/{slug}", json=body)
+
+
+@mcp.tool
 async def submit_result(
     run_id: str,
     name: str,

@@ -43,7 +43,7 @@
   .eyebrow { font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
     font-weight: 600; margin: 0 0 .55rem; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .7rem; margin-bottom: 1.2rem; }
-  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: .8rem .95rem; }
+  .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: .8rem .95rem; text-decoration: none; color: inherit; display: block; }
   .tile .v { font-size: 1.6rem; font-weight: 650; font-family: var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
   .tile .l { color: var(--muted); font-size: .78rem; margin-top: .15rem; }
 
@@ -232,19 +232,22 @@ function pagerHtml(hashPath,baseParams,offset,count,hasMore){
 
 /* ---------------- overview ---------------- */
 async function loadOverview(){
-  let programmes,recent,running;
+  let programmes,recent,running,health;
   try{
-    [programmes,recent,running]=await Promise.all([
+    [programmes,recent,running,health]=await Promise.all([
       api("/v1/programmes"),
       api("/v1/experiments?limit=10"),
       api("/v1/experiments?"+new URLSearchParams({status:"running",limit:"10"})),
+      api("/v1/experiments/health"),
     ]);
   }catch(e){$("#app").innerHTML=`<p class="err">Failed to load overview: ${esc(e.message)}</p>`;return;}
 
   const totalExperiments=programmes.reduce((sum,p)=>sum+(p.experiment_count||0),0);
   const tiles=[["Programmes",programmes.length],["Total experiments",totalExperiments],
     ["Currently running",running.length]];
-  const tilesH=tiles.map(([l,v])=>`<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+  const tilesH=tiles.map(([l,v])=>`<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("")
+    +`<a class="tile" href="#/experiments?needs_conclusion=true"><div class="v">${esc(health.needs_conclusion)}</div><div class="l">Needs conclusion</div></a>`
+    +`<a class="tile" href="#/experiments?needs_next_action=true"><div class="v">${esc(health.needs_next_action)}</div><div class="l">Needs next action</div></a>`;
 
   const progRows=programmes.map(p=>`<tr class="click" onclick="location.hash='#/experiments?programme='+encodeURIComponent('${esc(p.slug)}')"><td><a href="#/experiments?programme=${encodeURIComponent(p.slug)}">${esc(p.name)}</a></td><td class="num">${esc(p.experiment_count)}</td></tr>`).join("")
     ||`<tr><td colspan="2" class="empty">No programmes yet</td></tr>`;
@@ -287,6 +290,8 @@ async function loadExperimentsList(params){
   const programme=params.get("programme")||"";
   const status=params.get("status")||"";
   const tag=params.get("tag")||"";
+  const needsConclusion=params.get("needs_conclusion")==="true";
+  const needsNextAction=params.get("needs_next_action")==="true";
   const sort=params.get("sort")||"updated_at";
   const order=params.get("order")||"desc";
   const offset=Math.max(0,parseInt(params.get("offset")||"0",10)||0);
@@ -297,6 +302,8 @@ async function loadExperimentsList(params){
     if(programme)apiParams.set("programme",programme);
     if(status)apiParams.set("status",status);
     if(tag)apiParams.set("tag",tag);
+    if(needsConclusion)apiParams.set("needs_conclusion","true");
+    if(needsNextAction)apiParams.set("needs_next_action","true");
     [experiments,programmes]=await Promise.all([api("/v1/experiments?"+apiParams),api("/v1/programmes")]);
   }catch(e){$("#app").innerHTML=`<p class="err">Failed to load experiments: ${esc(e.message)}</p>`;return;}
 
@@ -312,6 +319,8 @@ async function loadExperimentsList(params){
   if(programme)sortParams.set("programme",programme);
   if(status)sortParams.set("status",status);
   if(tag)sortParams.set("tag",tag);
+  if(needsConclusion)sortParams.set("needs_conclusion","true");
+  if(needsNextAction)sortParams.set("needs_next_action","true");
   sortParams.set("sort",sort);sortParams.set("order",order);
 
   const statusChips=[["","all"]].concat(EXPERIMENT_STATUSES.map(s=>[s,s])).map(([value,label])=>{
@@ -325,6 +334,8 @@ async function loadExperimentsList(params){
 
   $("#app").innerHTML=`
     <h2>Experiments</h2>
+    ${needsConclusion?`<p class="muted">Showing completed experiments with no recorded conclusion.</p>`:""}
+    ${needsNextAction?`<p class="muted">Showing planned/running experiments with no recorded next action.</p>`:""}
     <div class="filters">
       <div class="chip-row" id="status-chips">${statusChips}</div>
       <select id="programme-select"><option value="">All programmes</option>${progOptions}</select>
@@ -332,7 +343,7 @@ async function loadExperimentsList(params){
         <input type="text" name="tag" placeholder="tag" value="${esc(tag)}">
         <button type="submit">Go</button>
       </form>
-      ${(programme||status||tag)?`<a href="#/experiments">Clear</a>`:""}
+      ${(programme||status||tag||needsConclusion||needsNextAction)?`<a href="#/experiments">Clear</a>`:""}
     </div>
     <table><tr>
       <th>${sortHeader("/experiments",sortParams,"title","Experiment")}</th>
@@ -392,6 +403,8 @@ async function loadExperimentDetail(slug){
     <h2>${esc(experiment.title)}</h2>
     <p>${pill(experiment.status)} ${(experiment.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join("")}</p>
     ${experiment.hypothesis?`<div class="card"><strong>Hypothesis</strong><p>${esc(experiment.hypothesis)}</p></div>`:""}
+    ${experiment.conclusion?`<div class="card"><strong>Conclusion</strong><p>${esc(experiment.conclusion)}</p></div>`:""}
+    ${experiment.next_action?`<div class="card"><strong>Next action</strong><p>${esc(experiment.next_action)}</p></div>`:""}
     ${rollupRows.length?`<h3>Results</h3><table><tr><th>Run</th><th>Metric</th><th>Value</th><th>Verdict</th></tr>${rollupRows.join("")}</table>`:""}
     <h3>Write-up ${writeup?`<span class="muted">(v${writeup.version}, ${esc(writeup.author)})</span>`:""}</h3>
     ${writeup?`<div class="writeup">${writeup.body_html}</div>`:`<p class="empty">No write-up yet</p>`}

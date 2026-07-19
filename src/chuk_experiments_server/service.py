@@ -38,6 +38,7 @@ from .constants import (
     RUN_REF_SEQUENCE,
     VALID_ARTIFACT_URI_PREFIXES,
     ArtifactRole,
+    ExperimentStatus,
     MetricOp,
     RunStatus,
     Scope,
@@ -157,6 +158,8 @@ async def list_experiments(
     status: str | None = None,
     tags: list[str] | None = None,
     q: str | None = None,
+    needs_conclusion: bool | None = None,
+    needs_next_action: bool | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
     sort: str = DEFAULT_EXPERIMENT_SORT,
@@ -183,6 +186,13 @@ async def list_experiments(
         where.append(f"e.tags && {bind(tags)}::text[]")
     if q:
         where.append(f"e.search @@ plainto_tsquery('english', {bind(q)})")
+    if needs_conclusion:
+        where.append(f"e.status = {bind(ExperimentStatus.COMPLETED.value)} AND e.conclusion IS NULL")
+    if needs_next_action:
+        where.append(
+            f"e.status IN ({bind(ExperimentStatus.PLANNED.value)}, {bind(ExperimentStatus.RUNNING.value)}) "
+            "AND e.next_action IS NULL"
+        )
 
     limit_param = bind(limit)
     offset_param = bind(offset)
@@ -204,11 +214,28 @@ async def list_experiments(
     return [ExperimentSummary.model_validate(dict(row)) for row in rows]
 
 
+async def get_research_health() -> dict[str, int]:
+    """Counts behind the Overview dashboard's "needs conclusion"/"needs next
+    action" tiles — how much of the research record risks going stale."""
+    pool = await get_pool()
+    needs_conclusion = await pool.fetchval(
+        "SELECT COUNT(*) FROM experiment WHERE status = $1 AND conclusion IS NULL",
+        ExperimentStatus.COMPLETED.value,
+    )
+    needs_next_action = await pool.fetchval(
+        "SELECT COUNT(*) FROM experiment WHERE status IN ($1, $2) AND next_action IS NULL",
+        ExperimentStatus.PLANNED.value,
+        ExperimentStatus.RUNNING.value,
+    )
+    return {"needs_conclusion": needs_conclusion, "needs_next_action": needs_next_action}
+
+
 async def get_experiment(slug: str) -> Experiment:
     pool = await get_pool()
     exp = await pool.fetchrow(
         """
-        SELECT e.id, e.slug, e.title, e.status, e.hypothesis, e.design, e.tags,
+        SELECT e.id, e.slug, e.title, e.status, e.hypothesis, e.conclusion, e.next_action,
+               e.design, e.tags,
                e.created_at, e.updated_at, p.slug AS programme_slug, p.name AS programme_name
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
@@ -281,6 +308,8 @@ async def update_experiment(slug: str, data: ExperimentUpdate) -> Experiment:
         UPDATE experiment SET
             status = COALESCE($2, status),
             tags = COALESCE($3, tags),
+            conclusion = COALESCE($4, conclusion),
+            next_action = COALESCE($5, next_action),
             updated_at = now()
         WHERE slug = $1
         RETURNING slug
@@ -288,6 +317,8 @@ async def update_experiment(slug: str, data: ExperimentUpdate) -> Experiment:
         slug,
         data.status.value if data.status else None,
         data.tags,
+        data.conclusion,
+        data.next_action,
     )
     if row is None:
         raise NotFoundError(f"No experiment with slug '{slug}'")

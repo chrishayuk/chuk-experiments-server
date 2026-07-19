@@ -101,6 +101,8 @@ class Experiment(RecordModel):
     title: str
     status: ExperimentStatus
     hypothesis: str | None = None
+    conclusion: str | None = None
+    next_action: str | None = None
     design: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
     created_at: datetime
@@ -131,6 +133,8 @@ class ExperimentCreate(BaseModel):
 class ExperimentUpdate(BaseModel):
     status: ExperimentStatus | None = None
     tags: list[str] | None = None
+    conclusion: str | None = None
+    next_action: str | None = None
 
 
 class SearchHit(RecordModel):
