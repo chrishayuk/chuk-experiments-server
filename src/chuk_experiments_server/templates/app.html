@@ -423,6 +423,8 @@ async function loadTeam(){
   try{[me,keys]=await Promise.all([api("/v1/me"),api("/v1/keys")]);}
   catch(e){$("#app").innerHTML=`<p class="err">Failed to load team: ${esc(e.message)}</p>`;return;}
 
+  const mcpUrl=location.origin+"/mcp";
+
   const isAdmin=me.role==="admin";
   let users=[];
   if(isAdmin){
@@ -451,6 +453,14 @@ async function loadTeam(){
   $("#app").innerHTML=`
     <h2>Team</h2>
     <p class="muted">Signed in as ${me.email?esc(me.email):"a bearer admin key"} &middot; role <span class="tag">${esc(me.role)}</span></p>
+
+    <div class="card">
+      <div class="hd"><h3>Connect via MCP</h3></div>
+      <p class="muted">Any MCP-capable client (e.g. Claude Code) can connect directly to this
+        server at <span class="mono">${esc(mcpUrl)}</span> using an API key generated below.</p>
+      <pre class="mono">claude mcp add --transport http chuk-experiments ${esc(mcpUrl)} --header "Authorization: Bearer &lt;YOUR_API_KEY&gt;"</pre>
+      <p class="muted">Generate a key below and this command will be filled in for you, ready to copy.</p>
+    </div>
 
     <div class="card">
       <div class="hd"><h3>New API key</h3></div>
@@ -490,8 +500,12 @@ async function loadTeam(){
     if(!scopes.length){box.innerHTML=`<p class="err">Choose at least one scope</p>`;return;}
     try{
       const created=await api("/v1/keys",{method:"POST",body:JSON.stringify({name:fd.get("name"),scopes})});
+      const connectCmd=`claude mcp add --transport http chuk-experiments ${mcpUrl} --header "Authorization: Bearer ${created.raw_key}"`;
       box.innerHTML=`<div class="card"><strong>Copy this now — shown only once</strong>
         <p class="mono" style="word-break:break-all">${esc(created.raw_key)}</p>
+        <p class="muted">Connect via MCP:</p>
+        <pre class="mono" id="mcp-connect-cmd" style="white-space:pre-wrap">${esc(connectCmd)}</pre>
+        <button type="button" data-copy-target="#mcp-connect-cmd">Copy command</button>
         <button type="button" id="new-key-done">Done</button></div>`;
       $("#new-key-done").addEventListener("click",loadTeam);
       ev.target.reset();
@@ -512,8 +526,15 @@ async function loadTeam(){
   $("#app").addEventListener("click",async ev=>{
     const keyId=ev.target.dataset.revokeKey;
     const userId=ev.target.dataset.revokeUser;
+    const copyTarget=ev.target.dataset.copyTarget;
     if(keyId){await api("/v1/keys/"+keyId,{method:"DELETE"});loadTeam();}
     else if(userId){await api("/v1/users/"+userId,{method:"DELETE"});loadTeam();}
+    else if(copyTarget){
+      const btn=ev.target,original=btn.textContent;
+      await navigator.clipboard.writeText($(copyTarget).textContent);
+      btn.textContent="Copied!";
+      setTimeout(()=>{btn.textContent=original;},1500);
+    }
   });
 }
 
