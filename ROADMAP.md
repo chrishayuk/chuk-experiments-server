@@ -294,6 +294,20 @@ code before fixing, each verified with a new regression test:
    run lifecycle into this server's `/v1/queue` contract. Explicitly
    sequenced after the dashboard was fully live, which it now is.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
+4. **Per-user GitHub/HF tokens** (Team screen) — `settings.github_token`/
+   `huggingface_token` today are single server-wide env vars, which forces
+   an awkward choice: leave unset (verify degrades to `unverifiable` under
+   rate limiting) or set one broadly-scoped personal token for everyone.
+   Concretely hit this 2026-07-19: migrating 11 real v12-tokenizer harness
+   artifacts to `git+` references, `verify_artifact` came back
+   `unverifiable` for all of them — not a bug, Fly's *shared* egress IP was
+   already at GitHub's 60/hr unauthenticated limit (confirmed: the same
+   commit checked fine, 51/60 remaining, from a non-Fly IP moments later).
+   The right fix isn't one shared secret; it's each user storing their own
+   token (encrypted at rest, same self-service model as API keys on the
+   Team screen already), used for that user's own `verify_artifact` calls
+   — narrower blast radius than a single broadly-scoped org-wide token,
+   and no Fly secret/redeploy needed to rotate or add one.
 
 ## New features under consideration (2026-07-19)
 
