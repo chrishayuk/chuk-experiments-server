@@ -100,10 +100,13 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
 
 `experiment.id`/`run.id` are sortable strings, not serial integers or UUIDs:
 `{PREFIX}-{YYYYMMDD}-{HHMMSS}-{5-digit sequence}`, e.g.
-`RUN-20260718-160217-00397` — matching the format gpu-training-harness's own
-train server already uses, so both sort chronologically as plain strings.
-`slug` is separate and human-chosen (`cn-7`), auto-generated in the same
-format when omitted.
+`RUN-20260718-160217-00397`. gpu-training-harness's own control plane uses the
+same sortable shape for its own execution ids, but deliberately a different
+prefix — `EXEC-…`, not `RUN-…` — since an EXEC execution and the RUN logical
+research run it realises are different things (linked explicitly via the
+run's `experiment_ref` field, never conflated by a shared id shape). `slug`
+is separate and human-chosen (`cn-7`), auto-generated in the same format when
+omitted.
 
 R2 and the dashboard degrade gracefully rather than erroring when not
 configured on a given deployment: artifact presign/upload routes reply `501
@@ -116,7 +119,9 @@ server missing either still serves everything else normally.
 - gpu-training-harness's own queue wired up to `/v1/queue` (the contract
   exists; the harness side of the integration doesn't yet).
 - Full Google Drive archival of historical local-disk experiment data —
-  `chuk-mlx` is done; `chris-experiments` is in progress. See ROADMAP.md.
+  `chuk-mlx` and `chris-experiments` are both done (archived, verified, and
+  their local copies reclaimed); `larql`/`cell80`/a long tail of other repos
+  are a much larger later pass, explicitly paused for now. See ROADMAP.md.
 
 ## Layout
 
@@ -161,7 +166,7 @@ scripts/
   migrate_chuk_mcp_lazarus.py            ~/.chuk-lazarus/experiments/*.json (172 of 1512 — rest is test noise)
   migrate_larql_aim_validation.py        ../larql/bench/aim-validation/*.json (3 — rest has no shared contract)
   archive_chuk_mlx_to_drive.py           chuk-mlx/experiments/ -> Google Drive (done, verified, local copy reclaimed)
-  archive_chris_experiments_to_drive.py  chris-experiments/ -> Google Drive (in progress)
+  archive_chris_experiments_to_drive.py  chris-experiments/ -> Google Drive (done, verified, local copy reclaimed)
   _drive_common.py                       shared OAuth/upload/manifest helpers for the archive_* scripts
   verify_harness_contract.py             E2E smoke test of the spec §6/§6a queue contract against a live server
 .github/workflows/
