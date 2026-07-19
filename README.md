@@ -28,15 +28,21 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   response ever has to pass through an agent's own context):
   ```bash
   curl -X POST https://chuk-experiments-server.fly.dev/v1/runs/$RUN_ID/artifacts/upload-raw \
-    -H "Authorization: Bearer $KEY" \
+    -H "Authorization: Bearer $CHUK_EXPERIMENTS_API_KEY" \
     -F "file=@tokenizer_bench.py" -F "name=tok-v12-harness" -F "kind=other"
   ```
-  The MCP tools (`upload_artifact_to_drive`/`upload_artifacts_batch`) exist
-  for the case an agent already has small bytes in-context — their
-  `content_base64` argument is necessarily emitted as literal text by the
-  calling model, so it shows up in full in that model's own transcript;
-  fine for a short snippet, real friction for anything larger, which is
-  exactly what `upload-raw` avoids. Uploads are **content-addressed by
+  (`$CHUK_EXPERIMENTS_API_KEY` — an environment variable, matching
+  gpu-training-harness's own naming for this same server — never paste the
+  literal key into the command itself; it's a credential leak for exactly
+  the same reason large base64 content is a context leak.) The MCP tools
+  (`upload_artifact_to_drive`/`upload_artifacts_batch`) exist for the case
+  an agent already has small bytes in-context — their `content_base64`
+  argument is necessarily emitted as literal text by the calling model, so
+  it shows up in full in that model's own transcript; the server enforces a
+  32KB decoded hard cap on both (rejecting anything larger with a 400) so
+  that's a deliberate, deterministic limit rather than a judgment call —
+  `upload-raw` is what anything bigger should use. Uploads are
+  **content-addressed by
   (name, sha256)**: register the same harness script or dataset under the
   same name across many runs (or several times in one batch) and it's
   stored exactly once — every later reference just gets a lightweight

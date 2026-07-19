@@ -851,7 +851,11 @@ async def test_artifacts_upload_rejects_oversized_content(api_client, write_key,
     from chuk_experiments_server.config import settings
 
     monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
-    monkeypatch.setattr(rest, "_MAX_UPLOAD_BYTES", 4)
+    # Distinct from _MAX_UPLOAD_BYTES (upload-raw's much larger ceiling) —
+    # this is the small hard cap on the base64/MCP-argument routes
+    # specifically, since that content is a literal tool-call argument that
+    # lands in the calling model's own transcript regardless of outcome.
+    monkeypatch.setattr(rest, "_MAX_INLINE_BASE64_BYTES", 4)
     await _create_experiment(api_client, write_key)
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
@@ -860,6 +864,25 @@ async def test_artifacts_upload_rejects_oversized_content(api_client, write_key,
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "upload-raw" in resp.json()["error"]
+
+
+async def test_artifacts_upload_batch_rejects_oversized_content(api_client, write_key, monkeypatch):
+    from chuk_experiments_server import rest
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(rest, "_MAX_INLINE_BASE64_BYTES", 4)
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/upload-batch",
+        json={"items": [{"filename": "x.txt", "kind": "other", "content_base64": "aGVsbG8=", "name": "x"}]},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.BAD_REQUEST
+    assert "items[0]" in resp.json()["error"]
+    assert "upload-raw" in resp.json()["error"]
 
 
 async def test_artifacts_upload_raw_creates_artifact(api_client, write_key, monkeypatch):

@@ -285,6 +285,32 @@ decisions made along the way that the spec didn't originally cover.
   of 369 experiments got a rewritten hypothesis and/or write-up, all
   content-preserving, all adversarially checked before touching production.
 
+- **Hard size cap on base64-inline artifact uploads** (2026-07-20) — real
+  incident: an agent called `upload_artifacts_batch` with a ~1.9MB file
+  inlined as ~2.5MB of base64 text, bloating that agent's own context/
+  transcript for no reason. The existing guardrail against exactly this was
+  prose-only (`upload_artifact_to_drive`/`upload_artifacts_batch`
+  docstrings "steer toward" `upload-raw`) — qualitative wording ("trivial,"
+  "genuinely small," one grammatically broken sentence), no concrete
+  threshold, and nothing server-side stopped it: the only size gate,
+  `_MAX_UPLOAD_BYTES` (20MB), was built for "large checkpoints belong in
+  R2," not "keep MCP-call payloads out of a transcript," and a 1.9MB file
+  never came close to tripping it. Fixed with a second, much smaller,
+  separately-enforced constant, `_MAX_INLINE_BASE64_BYTES` (32KB decoded),
+  applied only to the two base64/JSON routes (`upload`, `upload-batch` —
+  the ones an MCP tool call actually hits); `upload-raw` (multipart,
+  streamed from disk) and the R2 presign flow are untouched and keep the
+  original 20MB ceiling, since bytes never pass through a model's context
+  either way there. Both MCP tool docstrings now state the exact byte
+  limit instead of vague adjectives. Also fixed the same class of leak for
+  *credentials*: the `upload-raw` curl example told an agent to embed the
+  literal bearer key in a shell command (`-H "Authorization: Bearer
+  <key>"`), which shows up in that agent's transcript exactly like
+  oversized base64 would — docstrings and README.md now reference
+  `$CHUK_EXPERIMENTS_API_KEY` (an environment variable, matching
+  gpu-training-harness's own naming for this server) instead, with an
+  explicit instruction to never paste the literal key value.
+
 ## Fixed (found via code review, 2026-07-19)
 
 A review of `src/chuk_experiments_server/` (not the SPA, migrations, or

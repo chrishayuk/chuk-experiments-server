@@ -72,6 +72,18 @@ _DRIVE_NOT_CONFIGURED = {
 #: (bytes never transit the server at all). Large files belong in R2.
 _MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
+#: Hard cap for the JSON/base64 routes specifically (upload, upload-batch —
+#: the ones an MCP tool call hits, where content_base64 is a literal
+#: tool-call argument the calling model must emit as text, landing in that
+#: model's own transcript regardless of outcome). Kept small on purpose so an
+#: oversized call is rejected deterministically instead of relying on the
+#: model to judge "small enough" for itself. upload-raw (multipart, streamed
+#: from disk) and the R2 presign flow never route bytes through a model's
+#: context either way, so they keep the much larger _MAX_UPLOAD_BYTES ceiling
+#: instead. If this changes, update the matching text in tools.py's
+#: upload_artifact_to_drive/upload_artifacts_batch docstrings too.
+_MAX_INLINE_BASE64_BYTES = 32 * 1024
+
 
 def _ok(data: Any, status: HTTPStatus = HTTPStatus.OK) -> JSONResponse:
     return JSONResponse(to_jsonable(data), status_code=status.value)
@@ -437,8 +449,13 @@ def _decode_artifact_content(content_base64: str) -> tuple[bytes | None, str | N
         content = base64.b64decode(content_base64, validate=True)
     except binascii.Error:
         return None, "content_base64 is not valid base64"
-    if len(content) > _MAX_UPLOAD_BYTES:
-        return None, f"content exceeds {_MAX_UPLOAD_BYTES} bytes — use the R2 presign flow for large files"
+    if len(content) > _MAX_INLINE_BASE64_BYTES:
+        return None, (
+            f"content exceeds {_MAX_INLINE_BASE64_BYTES} bytes for an inline base64 "
+            "upload — use POST .../artifacts/upload-raw (multipart, streamed from "
+            "disk, no size penalty on the caller's own context) or the R2 presign "
+            "flow instead"
+        )
     return content, None
 
 
@@ -503,6 +520,8 @@ async def run_artifacts_upload(request: Request) -> Response:
     flow, where bytes never transit it at all) and gets uploaded straight to
     Google Drive — for small provenance/config/log/dataset files an agent
     has bytes for right now, not large checkpoints (those belong in R2).
+    Hard cap: content_base64 must decode to at most _MAX_INLINE_BASE64_BYTES
+    (32KB) — larger content is rejected with a 400 pointing at upload-raw.
 
     Content-addressed by (name, sha256): if this exact content was already
     uploaded under this name by an earlier run, that upload is reused
@@ -539,7 +558,8 @@ async def run_artifacts_upload_batch(request: Request) -> Response:
     """Same content-addressed upload as .../artifacts/upload, but N files in
     one round trip instead of N separate calls — each item dedups
     independently, including against an earlier item in the same batch (a
-    harness file registered twice in one batch is only uploaded once).
+    harness file registered twice in one batch is only uploaded once). Same
+    32KB-decoded-per-item hard cap as .../artifacts/upload.
 
     All items are base64-decoded and size-checked before anything is
     uploaded — one bad item fails the whole batch with no partial uploads.

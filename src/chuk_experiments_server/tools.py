@@ -391,19 +391,29 @@ async def upload_artifact_to_drive(
     """Upload local file content straight to Google Drive and register the
     resulting gdrive:// artifact for a run, in one step.
 
-    IMPORTANT — content_base64 is an MCP tool argument, which means YOU (the
-    calling model) must emit the entire base64 string as literal text to
-    make this call. For anything beyond a trivial size (a short config
-    snippet, a few hundred bytes) that floods your own context/transcript
-    for no reason. If you have shell access, prefer:
+    HARD LIMIT: content_base64 must decode to 32KB (32,768 bytes) or less —
+    the server rejects anything larger with a 400. This is deliberately
+    small: content_base64 is an MCP tool argument, so YOU (the calling
+    model) must emit the entire base64 string as literal text to make this
+    call, and it lands in your own transcript/context regardless of whether
+    the upload succeeds. Don't try a large file "to see if it fits" — check
+    the size first. For anything above a short generated snippet, use
+    upload-raw instead:
         curl -X POST <base_url>/v1/runs/{run_id}/artifacts/upload-raw \
-          -H "Authorization: Bearer <key>" \
+          -H "Authorization: Bearer $CHUK_EXPERIMENTS_API_KEY" \
           -F "file=@<local_path>" -F "name=<name>" -F "kind=<kind>"
     which streams the file straight from disk over the network — only the
     short JSON response ever reaches your context, regardless of file
-    size, and it needs nothing installed beyond curl. Reach for this tool
-    only when you already have the bytes in-context anyway (e.g. content
-    you just generated) and it's genuinely small.
+    size, and it needs nothing installed beyond curl. Never paste the
+    literal API key into that command either — it would show up in your
+    transcript exactly like oversized base64 content would. Reference it
+    via an environment variable that's already set in your shell
+    (CHUK_EXPERIMENTS_API_KEY, matching gpu-training-harness's own naming
+    for this same server); if none is set, ask the user to export one
+    rather than typing the raw key value yourself.
+
+    Reach for this tool only when you already have the bytes in-context
+    anyway (e.g. content you just generated) and it's under the limit above.
 
     Content-addressed by (name, sha256 of the bytes): if this exact content
     was already uploaded under this name by an earlier run, that upload is
@@ -424,7 +434,7 @@ async def upload_artifact_to_drive(
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
         name: Logical name for dedup/lineage (e.g. "tok-v12-harness") — reuse the
             same name every time this exact content might recur across runs
-        content_base64: The file's raw bytes, base64-encoded
+        content_base64: The file's raw bytes, base64-encoded — 32KB decoded max
         meta: Additional metadata (step, format, ...)
     """
     body = {
@@ -446,13 +456,17 @@ async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> An
     Each item dedups independently by (name, sha256), including against an
     earlier item in the same batch.
 
-    Same caution as upload_artifact_to_drive applies, multiplied by item
-    count: every item's content_base64 is emitted as literal text by you,
-    the calling model. For real files on disk, issue one
+    Same hard limit as upload_artifact_to_drive, per item: each item's
+    content_base64 must decode to 32KB (32,768 bytes) or less, and — like
+    that tool — every item's content_base64 is emitted as literal text by
+    you, the calling model, landing in your own transcript regardless of
+    item count or outcome. For real files on disk, issue one
     `curl -F file=@path ... /artifacts/upload-raw` call per file instead
-    (see upload_artifact_to_drive's docstring) — a few small curl calls
-    cost you far less context than one batch call carrying several files'
-    worth of base64.
+    (see upload_artifact_to_drive's docstring for the full command,
+    including how to pass the bearer key via an environment variable
+    instead of pasting it literally) — a few small curl calls cost you far
+    less context than one batch call carrying several files' worth of
+    base64.
 
     All items are validated before anything is uploaded — one bad item
     fails the whole batch rather than leaving some files stored and others
@@ -462,7 +476,8 @@ async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> An
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
         items: One dict per file, each with the same shape as
             upload_artifact_to_drive's arguments:
-            filename, kind, name, content_base64, and optionally meta.
+            filename, kind, name, content_base64 (32KB decoded max), and
+            optionally meta.
 
     Returns a list of created artifacts, in the same order as items.
     """
