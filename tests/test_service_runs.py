@@ -324,3 +324,42 @@ async def test_verify_artifact_prefers_requesting_users_own_token(monkeypatch):
     seen_tokens.clear()
     await service.verify_artifact(artifact.id, requesting_user_id=None)
     assert seen_tokens == ["server-wide-token"]
+
+
+async def test_list_external_ref_artifacts_only_includes_git_and_hf():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    git_artifact = await service.register_artifact(
+        run.id, ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123")
+    )
+    hf_artifact = await service.register_artifact(
+        run.id, ArtifactCreate(kind="checkpoint", uri="hf://model/chrishayuk/some-model@main")
+    )
+    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+    await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc"))
+
+    refs = await service.list_external_ref_artifacts()
+    assert {r.id for r in refs} == {git_artifact.id, hf_artifact.id}
+    assert all(r.experiment_slug == "cn-7" for r in refs)
+
+
+async def test_list_external_ref_artifacts_respects_limit_and_offset():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    for i in range(3):
+        await service.register_artifact(
+            run.id, ArtifactCreate(kind="other", uri=f"git+https://github.com/chrishayuk/chuk-mlx@commit{i}")
+        )
+
+    page = await service.list_external_ref_artifacts(limit=2, offset=0)
+    assert len(page) == 2
+
+    rest = await service.list_external_ref_artifacts(limit=2, offset=2)
+    assert len(rest) == 1
+
+
+async def test_list_external_ref_artifacts_empty_when_none_registered():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+    assert await service.list_external_ref_artifacts() == []

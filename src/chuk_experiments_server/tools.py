@@ -504,6 +504,23 @@ async def verify_artifact(artifact_id: int) -> Any:
 
 
 @mcp.tool
+async def list_external_ref_artifacts(limit: int | None = None, offset: int | None = None) -> Any:
+    """Every git+/hf:// reference artifact across all experiments — unlike
+    get_run/get_experiment, which only ever show one run's artifacts, this
+    is the whole-system view: what does this server currently point at on
+    GitHub/Hugging Face, and (via each row's verify_status/verified_at)
+    which of those references have actually been checked recently, and
+    which came back missing/unverifiable.
+
+    Args:
+        limit: Max rows to return (default 50, capped at 500)
+        offset: Rows to skip, for paging
+    """
+    params = _query_params(limit=limit, offset=offset)
+    return await _api_request("GET", "/v1/artifacts/external-refs", params=params)
+
+
+@mcp.tool
 async def get_artifact_lineage(artifact_id: int) -> Any:
     """Which run produced this artifact's content, and which other runs have
     since reused it (a dedup hit via upload_artifact_to_drive) — falls out

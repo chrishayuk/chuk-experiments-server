@@ -157,6 +157,18 @@ async def test_verify_artifact_tool_forwards_to_verify_route(tool_caller, monkey
     assert result["verify_detail"] == "commit exists"
 
 
+async def test_list_external_ref_artifacts_tool_only_returns_git_and_hf(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    git_artifact = await tools.register_git_artifact(
+        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123"
+    )
+    await tools.register_artifact(run["id"], kind="checkpoint", uri="s3://bucket/ckpt.bin")
+
+    refs = await tools.list_external_ref_artifacts()
+    assert [r["id"] for r in refs] == [git_artifact["id"]]
+
+
 async def test_upload_artifacts_batch_forwards_and_dedups(tool_caller, monkeypatch):
     from chuk_experiments_server import drive_storage
     from chuk_experiments_server.config import settings

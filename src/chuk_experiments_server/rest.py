@@ -696,6 +696,23 @@ async def artifact_verify(request: Request) -> Response:
     )
 
 
+@mcp.endpoint("/v1/artifacts/external-refs", methods=["GET"])
+@_with_error_handling
+async def artifacts_external_refs(request: Request) -> Response:
+    """Every git+/hf:// reference artifact across all experiments — a
+    run-detail page only shows one run's artifacts, this is the dashboard-
+    wide "what do we point at outside this server, and is it still there"
+    browse view (roadmap item 5, 2026-07-19)."""
+    await auth.require_scope_from_request(request, Scope.READ)
+    params = request.query_params
+    return _ok(
+        await service.list_external_ref_artifacts(
+            limit=_parse_limit(params.get("limit"), DEFAULT_LIST_LIMIT),
+            offset=_parse_offset(params.get("offset")),
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pins — named, repointable aliases to a specific artifact (e.g.
 # "tok-v12-tokenizer:latest"), W&B-style.

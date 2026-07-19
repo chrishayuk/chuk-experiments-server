@@ -58,6 +58,7 @@ from .models import (
     ExperimentCreate,
     ExperimentSummary,
     ExperimentUpdate,
+    ExternalRefSummary,
     IndexEntry,
     PinSummary,
     Programme,
@@ -908,6 +909,33 @@ async def find_checkpoints(
         *params,
     )
     return [Artifact.model_validate(dict(row)) for row in rows]
+
+
+async def list_external_ref_artifacts(
+    limit: int = DEFAULT_LIST_LIMIT, offset: int = 0
+) -> list[ExternalRefSummary]:
+    """Every git+/hf:// reference artifact across all experiments — the
+    dashboard-wide "what do we point at outside this server" view (item 5,
+    2026-07-19 roadmap): a run-detail page only shows one run's artifacts,
+    and there was no way to browse "every git/HF reference, and which of
+    them have gone stale" without opening runs one at a time."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT a.id, a.run_id, e.slug AS experiment_slug, e.title AS experiment_title,
+               a.kind, a.uri, a.name, a.role, a.meta, a.verify_status, a.verified_at,
+               a.verify_detail, a.created_at
+        FROM artifact a
+        JOIN run r ON r.id = a.run_id
+        JOIN experiment e ON e.id = r.experiment_id
+        WHERE a.uri LIKE 'git+%' OR a.uri LIKE 'hf://%'
+        ORDER BY a.created_at DESC
+        LIMIT $1 OFFSET $2
+        """,
+        limit,
+        offset,
+    )
+    return [ExternalRefSummary.model_validate(dict(row)) for row in rows]
 
 
 async def find_artifact_by_name_sha(name: str, sha256: str) -> Artifact | None:

@@ -414,6 +414,38 @@ async def test_artifact_verify_requires_write_scope(api_client, monkeypatch):
     assert resp.status_code == HTTPStatus.FORBIDDEN
 
 
+async def test_artifacts_external_refs_only_includes_git_and_hf(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    await api_client.post(
+        f"/v1/runs/{run_id}/artifacts",
+        json={"kind": "other", "uri": "git+https://github.com/chrishayuk/chuk-mlx@abc123"},
+        headers=_auth(write_key),
+    )
+    await api_client.post(
+        f"/v1/runs/{run_id}/artifacts",
+        json={"kind": "checkpoint", "uri": "s3://bucket/ckpt.bin"},
+        headers=_auth(write_key),
+    )
+
+    resp = await api_client.get("/v1/artifacts/external-refs", headers=_auth(write_key))
+    assert resp.status_code == HTTPStatus.OK
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["uri"] == "git+https://github.com/chrishayuk/chuk-mlx@abc123"
+    assert body[0]["experiment_slug"] == "cn-7"
+
+
+async def test_artifacts_external_refs_requires_auth(api_client):
+    resp = await api_client.get("/v1/artifacts/external-refs")
+    assert resp.status_code == HTTPStatus.UNAUTHORIZED
+
+
+async def test_artifacts_external_refs_accepts_dashboard_cookie(api_client, authenticated_cookies):
+    resp = await api_client.get("/v1/artifacts/external-refs", cookies=authenticated_cookies)
+    assert resp.status_code == HTTPStatus.OK
+
+
 async def test_artifacts_presign_not_configured(api_client, write_key, monkeypatch):
     # R2 is genuinely configured in this dev environment's .env — force the
     # "not configured" branch deterministically rather than relying on ambient state.

@@ -275,6 +275,26 @@ class PinSummary(RecordModel):
     artifact_name: str | None = None
 
 
+class ExternalRefSummary(RecordModel):
+    """list_external_ref_artifacts' shape — a git+/hf:// artifact
+    denormalized with enough of its owning run/experiment to render a
+    dashboard-wide browse screen without a second request per row."""
+
+    id: int
+    run_id: str
+    experiment_slug: str
+    experiment_title: str
+    kind: ArtifactKind
+    uri: str
+    name: str | None = None
+    role: ArtifactRole
+    meta: dict[str, Any] = Field(default_factory=dict)
+    verify_status: str | None = None
+    verified_at: datetime | None = None
+    verify_detail: str | None = None
+    created_at: datetime
+
+
 class ArtifactPinSet(BaseModel):
     artifact_id: int
 
