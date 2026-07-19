@@ -130,6 +130,40 @@ decisions made along the way that the spec didn't originally cover.
   there was previously no in-app guidance on how to actually connect an
   MCP client at all.
 
+## Known issues (found via code review, 2026-07-19)
+
+A review of `src/chuk_experiments_server/` (not the SPA, migrations, or
+scripts) turned up 7 concrete issues, all confirmed against the actual
+code, none needing a design call — fixing all of them next:
+
+1. **Open redirect via `meta.drive_url`** (`rest.py`) — a WRITE-scoped
+   caller can set `meta.drive_url` to an arbitrary URL (spread after the
+   computed value in `_upload_or_dedup_artifact`; never validated at all
+   on the plain `register_artifact` path). `artifact_download` then
+   302-redirects there unconditionally — an open-redirect/phishing vector
+   for anyone who opens a download link.
+2. **Admin-revocation race** (`service.py:revoke_user`) — the "don't
+   revoke the last admin" guard is check-then-act with no row lock; two
+   concurrent revokes of two different admins can both pass the count
+   check and leave zero active admins.
+3. **Dedup race breaks lineage** (`service.py`) — `find_artifact_by_name_sha`
+   + insert is check-then-act with no unique constraint; two simultaneous
+   uploads of identical `(name, sha256)` can both miss the dedup hit and
+   both insert `role='produced'`, and `get_artifact_lineage`'s `next(...)`
+   silently drops one of them from lineage entirely.
+4. **Unescaped Drive API query injection** (`drive_storage.py:ensure_folder`)
+   — artifact `name` is interpolated directly into a Drive query string
+   with no escaping; a `'` in the name breaks or reshapes the query.
+5. **`limit` params unbounded, bad input → 500 not 400** — `MAX_LIST_LIMIT`
+   is defined but referenced nowhere; `?limit=abc` raises an uncaught
+   `ValueError` that falls through to a generic 500 instead of a 400.
+6. **No exception logging anywhere** — `_with_error_handling`/`errors.py`
+   map every unmapped exception to `{"error": "internal_error"}` with zero
+   `logger.exception(...)` — real bugs vanish without a trace in
+   production.
+7. **`get_index()` has no pagination** — full table scan + a correlated
+   subquery per row, unbounded, on the tool documented as "most-used."
+
 ## Next
 
 1. **Google Drive archival of historical local-disk data** — in progress.
