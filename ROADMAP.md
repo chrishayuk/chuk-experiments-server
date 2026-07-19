@@ -201,18 +201,19 @@ code before fixing, each verified with a new regression test:
 
 ## Next
 
-1. **Google Drive archival of historical local-disk data** — in progress.
-   A survey found ~300GB of unmigrated data across the known sources,
-   overwhelmingly dominated by `larql/output/`'s 252GB of per-model
-   `.vindex`/checkpoint bundles (arguably general model storage rather than
-   per-experiment artifacts, and a materially different shape from the
-   other sources). Sequencing:
+1. **Google Drive archival of historical local-disk data** — first pass
+   done, wider machine-wide sweep paused (2026-07-19). A survey found
+   ~300GB of unmigrated data across the known sources, overwhelmingly
+   dominated by `larql/output/`'s 252GB of per-model `.vindex`/checkpoint
+   bundles (arguably general model storage rather than per-experiment
+   artifacts, and a materially different shape from the other sources).
+   Sequencing:
    - `chuk-mlx/experiments/` (~1.6G) — **done**: archived, verified
      (896/898 files; the 2 unarchived are `.pyc` bytecode caches, a
      deliberate exclusion), local copy reclaimed.
    - `chris-experiments/` (~19G) — **done**: archived, verified (`--verify`
      reports 4023/4023 files, byte-for-byte match against the real
-     checkout), local copy not yet reclaimed. Root-caused a silent
+     checkout), local copy reclaimed (22G → 3.3G). Root-caused a silent
      194-file gap on the way: the old catch-all only covered whole
      top-level directories with zero `INDEX.md` `Path:` references,
      missing root-level loose files and unindexed content sitting next to
@@ -224,10 +225,43 @@ code before fixing, each verified with a new regression test:
      × 2 extra copies) — deduped directly, and the script now checks for
      an existing matching artifact before registering (confirmed: 0
      duplicate groups after this run, despite most of the 153 directories
-     already being linked from earlier runs).
-   - `larql/output/` (252G) and `cell80/experiments/` (~20G, a 5th
-     experiment tree never onboarded as DB metadata at all) are explicit,
-     separate later decisions — not bundled into the first pass.
+     already being linked from earlier runs). **Near-miss during the local
+     reclaim**: the "safe to delete" check (manifest-listed + git-untracked
+     + size-matched-since-archival) doesn't account for the manifest having
+     just been *freshly written by this same archival run* — 106 genuinely
+     new, uncommitted files (not old archived data) legitimately passed all
+     three gates and were deleted, then restored from Drive by drive_id
+     once caught via a `git status` line-count regression. Any future
+     bulk-reclaim tooling needs to snapshot the manifest (or file list)
+     *before* the archival run it's auditing against, not read the
+     post-run manifest as if it were a stable, independent source of truth.
+   - `larql/` (406G) — partially reclaimed (2026-07-19): `target/` (153G,
+     plain Cargo build cache, gitignored, rebuilds via `cargo build
+     --release`) deleted outright; 2 of 17 `output/*.vindex` dirs
+     (`granite-4.1-8b-q4k`, `granite-4.1-3b-q4k`, 14.6G) deleted after
+     verifying file-for-file against `chrishayuk`'s HF namespace
+     (`HfApi.model_info(..., files_metadata=True)`, diffing both file
+     lists and sizes — not just repo-name matching). That check caught a
+     third candidate, `granite-4.1-30b-q4k.vindex`, that matched an HF repo
+     *by name* but wasn't actually backed up — HF had only 2.6GB of its
+     36.5GB, missing the actual weight binaries (`gate_vectors.bin`,
+     `interleaved_kquant.bin`). 406G → 240G. The remaining 15 `output/`
+     vindex dirs (~237G) have no HF counterpart at all and stay untouched.
+     This ad hoc verification is exactly what item 6 below (`git`/`hf`
+     artifact source kinds + a `verify` step) should make a built-in,
+     queryable server feature instead of a one-off shell/Python check.
+   - Not yet surveyed, explicitly paused for now: `cell80/` (~59G, also a
+     5th experiment tree never onboarded as DB metadata at all — see
+     `~/chris-source/cell80/experiments/`), `chuk-ai/` (~33G),
+     `gpu-training-harness/` (~13G), `chuk-speccy/` (~12G),
+     `chris-pile-3/` (~9.4G), `tiny-model/` (~5G), `chuk-ai-video/` (~5G),
+     `cardputer-sim/` (~4.3G), `chuk-soma/` (~2.8G),
+     `chuk-robot-benches/` (~2.5G), `ffn-record/` (~2.4G), and a long tail
+     of smaller (1-2G) directories. Same methodology applies: check git
+     state first (several of the above are git repos that may carry
+     uncommitted work, same as `chris-experiments`/`chuk-mlx` did), then
+     verify against whatever remote each already uses (Drive/HF/git) before
+     any local delete — never trust a naming convention alone.
    - Once fully archived, the dashboard should surface archived historical
      data alongside the DB-backed experiments, and MCP tools should be able
      to give an agent access to archived logs on request (artifact URIs are
@@ -274,6 +308,32 @@ out of scope. Prioritized, starting with the trace/span tree:
    specifically, not ML-specific at all.
 5. **Notifications on gate pass/fail or run completion** — a webhook/Slack
    ping instead of a manual check-back on long-running async work.
+6. **First-class external artifact sources: git repos, HF datasets, HF
+   models/checkpoints** — today `register_artifact` accepts an arbitrary
+   `uri` (any `s3://`/`gdrive://`/`https://`), but the only *upload* paths
+   are Drive and R2, so a harness that's itself a git repo, or a
+   checkpoint that's already an HF model, ends up either re-uploaded
+   wastefully or logged as an opaque URI with no structure. Concretely
+   motivated by a 2026-07-19 disk-reclaim pass over `larql/output/`: one
+   vindex directory *looked* backed up by name (`granite-4.1-30b-q4k`
+   matching `chrishayuk/granite-4.1-30b-q4k-vindex` on HF) but HF only had
+   2.6GB of its 36.5GB — the actual weight binaries were never published,
+   caught only by diffing the local file list against `HfApi.model_info(...,
+   files_metadata=True)` one-off in a shell, exactly the kind of check that
+   belongs in this server, not a scratch script. Two new `kind`s beyond
+   `drive`/`r2`: `git` (`repo` URL + pinned `commit` SHA — for "this run's
+   harness *is* `github.com/org/repo@abc123`," no source duplication into
+   Drive) and `hf` (`repo_id` + `revision`, `model` or `dataset` — for
+   checkpoints/datasets that already live on the Hub). Both need a
+   verification step (`GET /artifacts/{id}/verify`?) that does the same
+   diff-against-remote check the larql pass did by hand: git via `git
+   ls-remote`/checking the commit is reachable, HF via `HfApi.model_info`/
+   `dataset_info` file-list-and-size diff against what was registered —
+   surfacing "claims to be backed up but isn't" as a first-class, queryable
+   fact instead of something only discovered by an ad hoc audit. MCP tools
+   (`register_git_artifact`/`register_hf_artifact`), REST fields, and a
+   dashboard badge (git commit / HF repo link, verified vs. stale) all
+   follow from the same two `kind`s.
 
 Smaller, not-really-new-feature items noted alongside these: a Compare
 view in the dashboard (UI only, over the existing `compare_runs`), using
