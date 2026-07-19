@@ -210,18 +210,21 @@ code before fixing, each verified with a new regression test:
    - `chuk-mlx/experiments/` (~1.6G) — **done**: archived, verified
      (896/898 files; the 2 unarchived are `.pyc` bytecode caches, a
      deliberate exclusion), local copy reclaimed.
-   - `chris-experiments/` (~19G) — **in progress**, running against
-     production. Root-caused a silent 194-file gap: the old catch-all only
-     covered whole top-level directories with zero `INDEX.md` `Path:`
-     references, missing root-level loose files and unindexed content
-     sitting next to a programme dir's real (Path-referenced) experiment
-     subdirectories (e.g. `grammar/data/`) — replaced with a single
-     residual catch-all pass, verified byte-for-byte against the real
-     checkout. Also found and fixed a separate bug while re-running it:
+   - `chris-experiments/` (~19G) — **done**: archived, verified (`--verify`
+     reports 4023/4023 files, byte-for-byte match against the real
+     checkout), local copy not yet reclaimed. Root-caused a silent
+     194-file gap on the way: the old catch-all only covered whole
+     top-level directories with zero `INDEX.md` `Path:` references,
+     missing root-level loose files and unindexed content sitting next to
+     a programme dir's real (Path-referenced) experiment subdirectories
+     (e.g. `grammar/data/`) — replaced with a single residual catch-all
+     pass. Also found and fixed a separate bug while re-running it:
      artifact registration had no idempotency check, so 3 earlier runs had
      left 306 exact duplicate artifact rows in production (153 directories
      × 2 extra copies) — deduped directly, and the script now checks for
-     an existing matching artifact before registering.
+     an existing matching artifact before registering (confirmed: 0
+     duplicate groups after this run, despite most of the 153 directories
+     already being linked from earlier runs).
    - `larql/output/` (252G) and `cell80/experiments/` (~20G, a 5th
      experiment tree never onboarded as DB metadata at all) are explicit,
      separate later decisions — not bundled into the first pass.
