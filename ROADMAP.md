@@ -162,9 +162,16 @@ decisions made along the way that the spec didn't originally cover.
   automatically — GitHub's unauthenticated API is 60 req/hr. Dashboard
   renders these as a clickable chip to the real github.com/huggingface.co
   page plus a verified/missing/unverifiable badge, with re-verify firing
-  only on click. Explicitly not yet done: going through *existing*
-  artifacts already in production to see which are really git/HF-sourced
-  and re-registering them under this scheme — needs a live query first.
+  only on click. First real migration pass done same day: found
+  `tiny-model`'s v12-tokenizer harness code was itself uncommitted,
+  committed + pushed it (`d1f39b1`), then updated 11 of 241 production
+  artifacts in place (`gdrive://` → `git+`) whose recorded sha256 matched
+  that commit's content exactly byte-for-byte — 5 candidates deliberately
+  left untouched (2 with no recorded sha256 to verify against, 3 older
+  superseded revisions with no commit to honestly point at). This was a
+  narrow heuristic sweep (artifacts named like harness/script files) over
+  a small slice of the 241 total, not a real audit — see item 5 below for
+  the actual full sweep, not yet done.
 
 ## Fixed (found via code review, 2026-07-19)
 
@@ -294,7 +301,27 @@ code before fixing, each verified with a new regression test:
    run lifecycle into this server's `/v1/queue` contract. Explicitly
    sequenced after the dashboard was fully live, which it now is.
 3. **Phase 5** — pgvector hybrid search, W&B summary sync.
-4. **Per-user GitHub/HF tokens** (Team screen) — `settings.github_token`/
+4. **Full sweep of existing artifacts for git/HF migration candidates** —
+   the 2026-07-19 pass (see "Done" above) only checked 16 of 241 total
+   production artifacts, found by a narrow heuristic (gdrive:// artifacts
+   named like harness/script files). A real sweep means going through all
+   241: for each, does its `name`/`source_path`/content plausibly match a
+   real git commit or an already-published HF repo? — same byte-for-byte
+   verification discipline (sha256 against a real commit; file-list-and-
+   size diff against a real HF revision), not name-matching. Likely
+   surfaces more candidates than the harness-script slice already found
+   (e.g. checkpoints that happen to already be on HF).
+5. **Dashboard-wide visualization for git/HF-referenced artifacts** — today
+   a git/hf artifact only renders specially (chip + link + verify badge)
+   on the specific run-detail page it belongs to, or as a formatted link
+   if it's pinned. There's no aggregate view at all: no way to browse
+   "every artifact referencing a git repo or HF model across all
+   experiments," and no overview-level count of verified vs.
+   missing/unverifiable/never-checked. A dedicated screen (or a filter on
+   the existing Experiments/Search views) would make "which of our
+   external references have gone stale" a glanceable fact instead of
+   something only discoverable by opening runs one at a time.
+6. **Per-user GitHub/HF tokens** (Team screen) — `settings.github_token`/
    `huggingface_token` today are single server-wide env vars, which forces
    an awkward choice: leave unset (verify degrades to `unverifiable` under
    rate limiting) or set one broadly-scoped personal token for everyone.
