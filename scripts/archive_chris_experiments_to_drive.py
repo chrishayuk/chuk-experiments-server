@@ -16,10 +16,18 @@ matching the original migration exactly).
 
 155 of chris-experiments/'s directories have a Path: bullet (across 8
 programme dirs: foundations, compilation, routing, shannon, mechinterp,
-state-construction, grammar, larql). The other top-level directories are
-never referenced in INDEX.md at all — archived anyway (so nothing is lost
-once the disk is later reclaimed) but skip the register_artifact step,
-since there's no experiment to attach to.
+state-construction, grammar, larql). Everything else — top-level
+directories never referenced in INDEX.md at all (fleet, paper, ...), root-
+level loose files (README.md, INDEX.md itself, ...), and unindexed content
+sitting right next to a programme dir's real experiment subdirectories
+(grammar/data/, a bulk-data cache) — is still archived, by a single
+catch-all pass after the per-path uploads (see compute_residual_files),
+just without the register_artifact step, since there's no experiment to
+attach it to. An earlier version of this script only caught whole
+unreferenced top-level directories, silently missing the "partially
+indexed programme dir" case — 194 real files on a from-scratch chris-
+experiments run, root-caused via compute_residual_files against the real
+checkout before this script archived anything.
 
 google-auth/google-api-python-client are regular project dependencies now (drive_storage.py is a core server module), so a normal dev install already has them.
 """
@@ -32,7 +40,14 @@ from pathlib import Path
 import httpx
 from dotenv import load_dotenv
 
-from _drive_common import Manifest, ensure_folder, get_drive_service, upload_directory, verify_directory
+from _drive_common import (
+    Manifest,
+    ensure_folder,
+    get_drive_service,
+    iter_archivable_files,
+    upload_directory,
+    verify_directory,
+)
 from chuk_experiments_server.constants import GDRIVE_URI_PREFIX
 from migrate_chris_experiments import build_slug, experiment_id_and_title, parse_index
 
@@ -70,6 +85,25 @@ def discover_top_level_dirs(root: Path) -> list[Path]:
             continue
         dirs.append(child)
     return dirs
+
+
+def compute_residual_files(root: Path, path_to_slugs: dict[str, list[str]]) -> list[Path]:
+    """Every archivable file under root NOT reachable through an INDEX.md
+    Path: bullet — what the final catch-all pass in run_archive uploads.
+    This is deliberately NOT "whole top-level dirs with zero Path:
+    references" (the bug this replaces): a programme dir like grammar/
+    has some Path-referenced experiment subdirectories AND real unindexed
+    content sitting right next to them (grammar/data/, grammar/README.md)
+    — checking only whole top-level dirs missed all of that, silently,
+    every run. Computed without touching Drive, so --dry-run stays fully
+    offline."""
+    covered = {
+        item
+        for path in path_to_slugs
+        if (root / path).is_dir()
+        for item in iter_archivable_files(root / path)
+    }
+    return [item for item in iter_archivable_files(root) if item not in covered]
 
 
 def find_historical_run_id(client: httpx.Client, slug: str) -> str | None:
@@ -119,17 +153,23 @@ def run_archive(
         d for d in all_top_level_dirs if not any(p.startswith(d.name + "/") for p in path_to_slugs)
     ]
 
+    residual_files = compute_residual_files(root, path_to_slugs)
+
     print(f"Parsed {len(path_to_slugs)} Path-bearing directories from {index_path}")
     print(
         f"{len(unlinked_top_level)} of {len(all_top_level_dirs)} top-level dirs have no Path: reference"
         f" at all: {[d.name for d in unlinked_top_level]}"
     )
+    print(
+        f"{len(residual_files)} files fall outside every Path: bullet (root-level loose files, plus"
+        " unindexed content sitting next to a partially-indexed programme dir's real experiment"
+        " subdirectories) — archived by the final catch-all pass, never linked to any experiment"
+    )
 
     if dry_run:
         for path, slugs in sorted(path_to_slugs.items()):
             print(f"  {path:60s} -> {slugs}")
-        for d in unlinked_top_level:
-            print(f"  {d.name:60s} -> (archived, unlinked — no INDEX.md reference)")
+        print(f"  (+{len(residual_files)} residual files -> archived, unlinked)")
         return
 
     if not api_key:
@@ -193,12 +233,20 @@ def run_archive(
             register_archive_artifact(client, run_id, folder_id, path)
             linked += 1
 
-    for d in unlinked_top_level:
-        folder_id = folder_for_relative_path(d.name)
-        files, size = upload_directory(service, d, folder_id, manifest, root)
-        total_files += files
-        total_bytes += size
-        print(f"  {d.name:60s} +{files} files, +{size:,} bytes (archived, unlinked)")
+    # Catch-all: root-level loose files (README.md, INDEX.md itself, ...)
+    # and any content nested inside a programme dir that has SOME
+    # Path-referenced experiment subdirectories but isn't itself indexed
+    # (grammar/data/, a bulk-data cache sitting right next to grammar's
+    # real experiment dirs) — everything the per-path loop above didn't
+    # already reach. One recursive pass over `root`, resumable via the
+    # same manifest so nothing already uploaded gets re-sent; skips
+    # anything should_skip flags (.git, .claude, .DS_Store, symlinks).
+    catch_all_files, catch_all_bytes = upload_directory(service, root, source_root_id, manifest, root)
+    total_files += catch_all_files
+    total_bytes += catch_all_bytes
+    print(
+        f"  (catch-all, unindexed)                                      +{catch_all_files} files, +{catch_all_bytes:,} bytes"
+    )
 
     print(
         f"Done: {total_files} files, {total_bytes:,} bytes uploaded."

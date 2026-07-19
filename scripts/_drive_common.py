@@ -37,22 +37,28 @@ def upload_file(service, local_path: Path, parent_id: str) -> str:
     return created["id"]
 
 
+_SKIP_DIR_NAMES = (".git", ".claude")
+
+
 def should_skip(path: Path) -> bool:
     """Symlinks (avoid double-archiving content already captured elsewhere
-    in the same tree) and .git (source control history, not experiment
-    data) are skipped, not silently followed/uploaded."""
-    return path.is_symlink() or ".git" in path.parts
+    in the same tree), .git (source control history), .claude (local tool
+    state), and macOS's .DS_Store are skipped, not silently followed/
+    uploaded — none of it is experiment data."""
+    if path.is_symlink() or path.name == ".DS_Store":
+        return True
+    return any(name in path.parts for name in _SKIP_DIR_NAMES)
 
 
 def iter_archivable_files(local_dir: Path):
     """Yields every file under local_dir that upload_directory/verify_directory
     would archive — os.walk with followlinks=False so a symlinked
     subdirectory is never traversed into, plus should_skip for file
-    symlinks and any stray .git/ dir. Shared so upload and verify can never
-    silently disagree on what counts."""
+    symlinks and any stray .git/.claude dir. Shared so upload and verify
+    can never silently disagree on what counts."""
     for dirpath, dirnames, filenames in os.walk(local_dir, followlinks=False):
         current = Path(dirpath)
-        if ".git" in current.parts:
+        if any(name in current.parts for name in _SKIP_DIR_NAMES):
             dirnames[:] = []
             continue
         for filename in sorted(filenames):
