@@ -216,20 +216,52 @@ async def test_get_index_includes_headline_metric():
 
     await service.submit_result(run.id, "tester", ResultCreate(name="gsm8k_acc", value=0.72, verdict="pass"))
 
-    index = await service.get_index()
+    index, total = await service.get_index()
     assert len(index) == 1
+    assert total == 1
     assert index[0].headline_metric.name == "gsm8k_acc"
     assert index[0].headline_metric.value == 0.72
 
 
-async def test_get_index_respects_limit_and_offset():
+async def test_get_index_excludes_superseded_headline_metric():
+    await service.create_experiment(_experiment_create())
+    run = await service.enqueue_run(_run_create())
+    from chuk_experiments_server.models import ResultCreate
+
+    old = await service.submit_result(run.id, "tester", ResultCreate(name="acc", value=0.5))
+    await service.submit_result(run.id, "tester", ResultCreate(name="acc", value=0.9, supersedes=old.id))
+
+    index, _total = await service.get_index()
+    assert index[0].headline_metric.value == 0.9
+
+
+async def test_get_index_respects_limit_and_offset_and_reports_total():
     for i in range(3):
         await service.create_experiment(_experiment_create(slug=f"cn-{i}"))
 
-    first_page = await service.get_index(limit=2)
-    second_page = await service.get_index(limit=2, offset=2)
+    first_page, total_1 = await service.get_index(limit=2)
+    second_page, total_2 = await service.get_index(limit=2, offset=2)
     assert len(first_page) == 2
     assert len(second_page) == 1
+    assert total_1 == 3
+    assert total_2 == 3
+
+
+async def test_get_index_filters_by_programme():
+    await service.create_experiment(_experiment_create())
+    await service.create_experiment(_experiment_create(programme="other", slug="other-1"))
+
+    index, total = await service.get_index(programme="cn")
+    assert [e.slug for e in index] == ["cn-7"]
+    assert total == 1
+
+
+async def test_get_index_truncates_long_hypothesis():
+    long_hypothesis = "x" * 300
+    await service.create_experiment(_experiment_create(hypothesis=long_hypothesis))
+
+    index, _total = await service.get_index()
+    assert len(index[0].hypothesis) == 200
 
 
 def _run_create(**overrides):

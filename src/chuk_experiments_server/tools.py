@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 from . import auth, external_refs, internal_client
-from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT
+from .constants import DEFAULT_LIST_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_LIST_LIMIT
 from .server import mcp
 
 
@@ -45,20 +45,68 @@ def _query_params(**kwargs: Any) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
+def _drop_body_html(data: Any) -> Any:
+    """Strip the always-computed, never-stored body_html from a write-up
+    payload before it reaches an agent — every write-up read/append path
+    returns body_md and body_html unconditionally, but body_html is only
+    ever useful to the dashboard's own renderer (which calls REST directly),
+    so returning it here is pure token waste on the MCP path."""
+    if not isinstance(data, dict):
+        return data
+    data = {k: v for k, v in data.items() if k != "body_html"}
+    if isinstance(data.get("latest_writeup"), dict):
+        data["latest_writeup"] = {k: v for k, v in data["latest_writeup"].items() if k != "body_html"}
+    return data
+
+
+def _listing(items: list[Any], empty_message: str, *, total: int | None = None) -> dict[str, Any]:
+    """Wrap a list-returning tool's response so an empty result is
+    self-describing (0 count + a reason) instead of a bare [] that reads as
+    ambiguous between "nothing exists", "wrong query", and "tool failure" —
+    a real failure mode an agent hit more than once in one session."""
+    result: dict[str, Any] = {"results": items, "count": len(items)}
+    if total is not None:
+        result["total"] = total
+    if not items:
+        result["message"] = empty_message
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Read tools
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool
-async def get_index() -> Any:
-    """The primary discovery tool — the entire compact catalogue in one call:
-    slug, title, tags, status, hypothesis, and headline metric per
-    experiment. Small enough to read in full and match semantically
-    yourself; try this before search_experiments, and try 2-3 phrasings of
-    search_experiments before concluding something doesn't exist.
+async def get_index(programme: str | None = None, limit: int = MAX_LIST_LIMIT, offset: int = 0) -> Any:
+    """A compact, paginated catalogue: slug, title, tags, status, hypothesis
+    (truncated to ~200 chars — full text is in get_experiment), and headline
+    metric per experiment.
+
+    NOT "the whole catalogue in one call" once a project has more than a
+    couple hundred experiments — check `total` in the response against
+    `count`/your `limit` and page with `offset` if they differ. For
+    structured filtering (status, tags, conclusion/next-action needed)
+    rather than a compact skim, use list_experiments instead — this tool's
+    value is the hypothesis+headline-metric projection, not filter power.
+    Try this (or list_experiments) before search_experiments for browsing;
+    try 2-3 phrasings of search_experiments before concluding something
+    doesn't exist by search alone.
+
+    Args:
+        programme: Only experiments in this programme (e.g. "cn")
+        limit: Maximum rows to return this page
+        offset: Rows to skip (for paging past `limit`)
     """
-    return await _api_request("GET", "/v1/index")
+    params = _query_params(programme=programme, limit=limit, offset=offset)
+    body = await _api_request("GET", "/v1/index", params=params)
+    if not isinstance(body, dict) or "results" not in body:
+        return body
+    return _listing(
+        body["results"],
+        "0 experiments" + (f" in programme {programme!r}" if programme else "") + " exist.",
+        total=body.get("total"),
+    )
 
 
 @mcp.tool
@@ -97,7 +145,7 @@ async def get_experiment(slug: str) -> Any:
     Args:
         slug: Experiment slug (e.g. "cn-7")
     """
-    return await _api_request("GET", f"/v1/experiments/{slug}")
+    return _drop_body_html(await _api_request("GET", f"/v1/experiments/{slug}"))
 
 
 @mcp.tool
@@ -107,6 +155,13 @@ async def search_experiments(
     limit: int = DEFAULT_SEARCH_LIMIT,
 ) -> Any:
     """Full-text search over titles/hypotheses/write-ups, combinable with structured filters.
+
+    Search is lexical (Postgres FTS), not semantic — a paraphrase of an
+    experiment's exact topic can return nothing even though the experiment
+    exists. Zero hits doesn't mean "not found"; it means "not found under
+    these words" — try 2-3 different phrasings before concluding something
+    doesn't exist, and consider list_experiments/get_index (browse instead
+    of search) if you're not sure what terms it would use.
 
     Args:
         query: Free-text search query
@@ -129,22 +184,49 @@ async def search_experiments(
         params["metric"] = filters["metric"]
         params["op"] = filters["metric_op"]
         params["value"] = filters["metric_value"]
-    return await _api_request("GET", "/v1/search", params=params)
+    hits = await _api_request("GET", "/v1/search", params=params)
+    if not isinstance(hits, list):
+        return hits
+    return _listing(
+        hits,
+        f"0 experiments matched {query!r} via lexical search (not semantic) with "
+        "the given filters — try a different phrasing, or list_experiments/"
+        "get_index to browse instead of searching.",
+    )
 
 
 @mcp.tool
-async def get_run(run_id: str) -> Any:
+async def get_run(run_id: str, summary: bool = False) -> Any:
     """Fetch one run's detail: config, W&B URL, results, and registered artifacts.
+
+    A run with many long result notes can run to ~15K tokens, most of which
+    is rarely what a caller actually needs. Pass summary=True to elide each
+    result's `notes` (keeping name/value/value_json/verdict/superseded_by —
+    the queryable/comparable parts) when you just need to know what was
+    measured, not the full interpretation; call again without summary, or
+    look at a specific result, when you need the prose too.
 
     Args:
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
+        summary: Elide result notes to shrink the response
     """
-    return await _api_request("GET", f"/v1/runs/{run_id}")
+    data = await _api_request("GET", f"/v1/runs/{run_id}")
+    if summary and isinstance(data, dict) and isinstance(data.get("results"), list):
+        data["results"] = [{**r, "notes": None} for r in data["results"]]
+    return data
 
 
 @mcp.tool
 async def compare_runs(run_ids: list[str], metric: str) -> Any:
     """Tabular comparison of a single named metric across several runs.
+
+    Returns one row per run id given. Check `found` on each row before
+    trusting `value`/`value_json`/`verdict`: `found: false` means that run
+    has no current result named `metric` at all — distinct from `found:
+    true` with a genuinely null value/verdict. A superseded result (see
+    submit_result/mark_result_superseded) is never returned here; only the
+    current, corrected value is. If the returned list is empty entirely
+    (not just all-`found: false`), none of the given run_ids exist.
 
     Args:
         run_ids: Run ids to compare
@@ -174,10 +256,21 @@ async def find_checkpoints(
 async def peek_queue(backend: str | None = None) -> Any:
     """Preview ready-to-claim runs (queued, dependencies satisfied) without claiming them.
 
+    An empty result means either the queue is genuinely empty, or every
+    queued run has an unmet dependency (see depends_on on the run) — not a
+    tool failure.
+
     Args:
         backend: Only runs whose requirements accept this backend (or 'any'/unset)
     """
-    return await _api_request("GET", "/v1/queue", params=_query_params(backend=backend))
+    runs = await _api_request("GET", "/v1/queue", params=_query_params(backend=backend))
+    if not isinstance(runs, list):
+        return runs
+    return _listing(
+        runs,
+        "0 runs ready to claim — either the queue is empty, or every queued "
+        "run has an unmet dependency (check depends_on).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +285,7 @@ async def create_experiment(
     slug: str | None = None,
     hypothesis: str | None = None,
     design: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
 ) -> Any:
     """Register a new planned experiment.
 
@@ -224,6 +318,9 @@ async def create_experiment(
         design: Model/dataset/params/arms as a JSON object — this is where
             harness components, acronyms, and configuration inventories
             belong, not in `hypothesis`
+        tags: Freeform labels for filtering later (list_experiments/
+            search_experiments both filter on these) — set them now rather
+            than via a follow-up update_experiment_status call
     """
     body = {
         "programme": programme,
@@ -231,6 +328,7 @@ async def create_experiment(
         "title": title,
         "hypothesis": hypothesis,
         "design": design or {},
+        "tags": tags or [],
     }
     return await _api_request("POST", "/v1/experiments", json=body)
 
@@ -273,7 +371,9 @@ async def append_writeup(slug: str, body_md: str) -> Any:
             (jargon crammed together with no claim) makes a write-up
             unreadable too.
     """
-    return await _api_request("POST", f"/v1/experiments/{slug}/writeups", json={"body_md": body_md})
+    return _drop_body_html(
+        await _api_request("POST", f"/v1/experiments/{slug}/writeups", json={"body_md": body_md})
+    )
 
 
 @mcp.tool
@@ -318,32 +418,101 @@ async def submit_result(
     run_id: str,
     name: str,
     value: float | None = None,
+    value_json: dict[str, Any] | None = None,
     verdict: str | None = None,
     notes: str | None = None,
+    supersedes: int | None = None,
 ) -> Any:
-    """Submit a named metric/verdict for a run (submitted_by is the calling API key's identity).
+    """Submit a named metric/verdict for a run (submitted_by is the calling
+    API key's identity).
+
+    Numbers belong in value/value_json, not notes — compare_runs can only
+    see the former. Bad: submitting one result named
+    "held_out_bpb_corrected_four_way" with value=1.0 (a placeholder) and the
+    real numbers written out as prose in notes ("v11-replication 0.6846 vs
+    U16 0.7058 vs U18 0.7062 vs BPE16 0.7461..."). That table is now
+    invisible to compare_runs — a caller asking for "held_out_bpb" gets back
+    an all-null row and no way to know the numbers exist at all. Good: submit
+    one result per comparable number (name="held_out_bpb_v11_replication",
+    value=0.6846; name="held_out_bpb_u16", value=0.7058; ...) — or, if they're
+    genuinely one structured measurement, one result with
+    value_json={"v11_replication": 0.6846, "u16": 0.7058, "u18": 0.7062,
+    "bpe16": 0.7461}. Either way, save notes for interpretation ("U18 beats
+    U16 because...") rather than the numbers themselves.
+
+    If this result corrects an earlier, now-wrong one, pass
+    supersedes=<that result's id> — e.g. result 1139 was contaminated and
+    wrong; its correction (1141/1142) should have been submitted with
+    supersedes=1139 instead of only noting the correction in prose. This
+    marks 1139.superseded_by so anyone fetching it later — even in
+    isolation, even by ranking on verdict — sees it's no longer current,
+    instead of silently trusting a stale "pass". Use mark_result_superseded
+    instead if you're linking two results that already exist, retroactively.
 
     Args:
         run_id: Run id (e.g. "RUN-20260718-160217-00397")
         name: Metric name (e.g. "val_loss_final")
         value: Scalar metric value
+        value_json: Structured metric value (e.g. a small table/breakdown) —
+            use this or value, whichever fits the shape of the number(s)
         verdict: pass/fail/inconclusive/n/a
-        notes: Free-text notes
+        notes: Free-text interpretation — not where the numbers themselves go
+        supersedes: id of an earlier result this one corrects, if any
     """
-    body = {"name": name, "value": value, "verdict": verdict, "notes": notes}
+    body = {
+        "name": name,
+        "value": value,
+        "value_json": value_json,
+        "verdict": verdict,
+        "notes": notes,
+        "supersedes": supersedes,
+    }
     return await _api_request("POST", f"/v1/runs/{run_id}/results", json=body)
 
 
 @mcp.tool
+async def mark_result_superseded(result_id: int, superseded_by: int) -> Any:
+    """Retroactively mark an existing result as superseded by another —
+    for when you realize an old result was wrong *after* already submitting
+    its correction, rather than at submission time (use submit_result's own
+    `supersedes` param for the common "submit the fix now" case instead).
+
+    Once set, anyone fetching result_id later — via get_run, in isolation,
+    or by ranking on verdict — sees it's no longer current, instead of
+    silently trusting a stale pass/fail.
+
+    Args:
+        result_id: The result that is now known-wrong
+        superseded_by: The result that corrects it
+    """
+    return await _api_request(
+        "POST", f"/v1/results/{result_id}/supersede", json={"superseded_by": superseded_by}
+    )
+
+
+def _artifact_parent_path(run_id: str | None, experiment_slug: str | None) -> str | dict[str, Any]:
+    """Resolve which REST path an artifact-registration call targets. Returns
+    the path string, or an error dict (never raises — matches every other
+    tool in this module) if the caller gave both or neither parent."""
+    if (run_id is None) == (experiment_slug is None):
+        return {"error": "give exactly one of run_id or experiment_slug, not both/neither"}
+    if run_id is not None:
+        return f"/v1/runs/{run_id}/artifacts"
+    return f"/v1/experiments/{experiment_slug}/artifacts"
+
+
+@mcp.tool
 async def register_artifact(
-    run_id: str,
     kind: str,
     uri: str,
+    run_id: str | None = None,
+    experiment_slug: str | None = None,
     sha256: str | None = None,
     name: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Any:
-    """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for a run.
+    """Record an artifact pointer (checkpoint/log/dataset/figure/tensor) for
+    a run — or, with no run yet, directly for an experiment.
 
     A run typically accumulates several kinds of artifact over its life: the
     harness/code that ran (custom, or a standard one you already know how to
@@ -352,31 +521,41 @@ async def register_artifact(
     only during execution generally aren't worth registering at all — only
     things someone (human or agent) might later need to fetch back.
 
+    Give exactly one of run_id/experiment_slug. Use experiment_slug for
+    provenance that exists before any run does — the paradigm case is a
+    pre-registration document: it needs queryable sha256/commit lineage
+    (get_artifact_lineage/verify_artifact) the moment it's written, not
+    "once a run eventually exists to attach it to."
+
     uri MUST already be a real, reachable location — s3://, gdrive://, or
     https://. NEVER a local file:// path or bare filesystem path: nobody
     else (not this dashboard, not a future agent, not you in a new session)
     can resolve a path on your own machine. If you have local file bytes to
     attach, call upload_artifact_to_drive instead — it uploads the content
-    and registers the resulting gdrive:// artifact in one step. For large
-    files (checkpoints, multi-MB+), use the presign flow
-    (POST /v1/runs/{run_id}/artifacts/presign) instead of either — bytes
-    should go straight to R2, not through this server.
+    and registers the resulting gdrive:// artifact in one step (run-scoped
+    only, for now). For large files (checkpoints, multi-MB+), use the
+    presign flow (POST /v1/runs/{run_id}/artifacts/presign) instead of
+    either — bytes should go straight to R2, not through this server.
 
     A checkpoint already sitting in another project's own storage (e.g.
     gpu-training-harness's s3://chuk-train/...) should just be linked here
     via this uri, not re-uploaded — this call only ever records a pointer.
 
     Args:
-        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other)
         uri: Storage URI already reachable — s3://..., gdrive://..., or https://...
+        run_id: Run id (e.g. "RUN-20260718-160217-00397") — or experiment_slug, not both
+        experiment_slug: Experiment slug (e.g. "cn-7") to attach directly, no run — or run_id, not both
         sha256: Content hash, if known — enables lineage/dedup lookups when name is also given
         name: Logical name grouping this content across runs (e.g. "v11-tokenizer"),
             for get_artifact_lineage/pins — omit for a one-off pointer with no reuse story
         meta: Additional metadata (step, epoch, format, ...)
     """
+    path = _artifact_parent_path(run_id, experiment_slug)
+    if isinstance(path, dict):
+        return path
     body = {"kind": kind, "uri": uri, "sha256": sha256, "name": name, "meta": meta or {}}
-    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+    return await _api_request("POST", path, json=body)
 
 
 @mcp.tool
@@ -486,45 +665,55 @@ async def upload_artifacts_batch(run_id: str, items: list[dict[str, Any]]) -> An
 
 @mcp.tool
 async def register_git_artifact(
-    run_id: str,
     owner: str,
     repo: str,
     commit: str,
+    run_id: str | None = None,
+    experiment_slug: str | None = None,
     kind: str = "other",
     name: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Any:
-    """Record that a run's harness/code IS a git commit — for when the code
-    already lives in a GitHub repo, so there's no reason to re-upload it as
-    a Drive file. Registers `git+https://github.com/{owner}/{repo}@{commit}`
-    (no bytes ever move) with `meta.git_repo`/`meta.git_commit` set for the
-    dashboard, matching what you'd get from `git rev-parse HEAD` and your
-    remote's owner/repo in the harness's own working directory.
+    """Record that a run's (or experiment's) harness/code IS a git commit —
+    for when the code already lives in a GitHub repo, so there's no reason
+    to re-upload it as a Drive file. Registers
+    `git+https://github.com/{owner}/{repo}@{commit}` (no bytes ever move)
+    with `meta.git_repo`/`meta.git_commit` set for the dashboard, matching
+    what you'd get from `git rev-parse HEAD` and your remote's owner/repo.
+
+    Give exactly one of run_id/experiment_slug — use experiment_slug for a
+    pre-registration document's own code/config commit, registered before
+    any run exists.
 
     Call verify_artifact on the returned id any time you want to confirm
     the commit still actually exists on GitHub (e.g. before trusting it as
     a citation) rather than assuming registration alone means it's real.
 
     Args:
-        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         owner: GitHub org/user (e.g. "chrishayuk")
         repo: Repo name (e.g. "chuk-mlx")
         commit: Full commit SHA the harness ran at
+        run_id: Run id (e.g. "RUN-20260718-160217-00397") — or experiment_slug, not both
+        experiment_slug: Experiment slug to attach directly, no run — or run_id, not both
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other) — usually "other" for code
         name: Logical name for dedup/lineage across runs (e.g. "tok-v12-harness")
         meta: Additional metadata — git_repo/git_commit are always set from
             owner/repo/commit and win over any caller-supplied values of the same keys
     """
+    path = _artifact_parent_path(run_id, experiment_slug)
+    if isinstance(path, dict):
+        return path
     uri = external_refs.build_git_uri(owner, repo, commit)
     computed_meta = {**(meta or {}), "git_repo": f"{owner}/{repo}", "git_commit": commit}
     body = {"kind": kind, "uri": uri, "name": name, "meta": computed_meta}
-    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+    return await _api_request("POST", path, json=body)
 
 
 @mcp.tool
 async def register_hf_artifact(
-    run_id: str,
     repo_id: str,
+    run_id: str | None = None,
+    experiment_slug: str | None = None,
     revision: str = "main",
     repo_type: str = "model",
     kind: str = "other",
@@ -532,11 +721,14 @@ async def register_hf_artifact(
     name: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Any:
-    """Record that a run's checkpoint/dataset IS already a Hugging Face Hub
-    repo — for when the artifact already lives on the Hub, so there's no
-    reason to re-upload it. Registers `hf://{repo_type}/{repo_id}@{revision}`
-    (no bytes ever move) with `meta.hf_repo_id`/`meta.hf_revision`/
-    `meta.hf_repo_type` set for the dashboard.
+    """Record that a run's (or experiment's) checkpoint/dataset IS already a
+    Hugging Face Hub repo — for when the artifact already lives on the Hub,
+    so there's no reason to re-upload it. Registers
+    `hf://{repo_type}/{repo_id}@{revision}` (no bytes ever move) with
+    `meta.hf_repo_id`/`meta.hf_revision`/`meta.hf_repo_type` set for the
+    dashboard.
+
+    Give exactly one of run_id/experiment_slug.
 
     Pass bytes (the total expected size of the repo at this revision, if
     you know it) to make verify_artifact's check meaningful beyond "the
@@ -546,8 +738,9 @@ async def register_hf_artifact(
     the repo/revision existed.
 
     Args:
-        run_id: Run id (e.g. "RUN-20260718-160217-00397")
         repo_id: Hub repo id (e.g. "chrishayuk/granite-4.1-3b-q4k-vindex")
+        run_id: Run id (e.g. "RUN-20260718-160217-00397") — or experiment_slug, not both
+        experiment_slug: Experiment slug to attach directly, no run — or run_id, not both
         revision: Branch/tag/commit on the Hub (default "main")
         repo_type: "model" or "dataset"
         kind: Artifact kind (checkpoint/log/dataset/figure/tensor/other) — usually "checkpoint" or "dataset"
@@ -558,6 +751,9 @@ async def register_hf_artifact(
             always set from repo_id/revision/repo_type and win over any
             caller-supplied values of the same keys
     """
+    path = _artifact_parent_path(run_id, experiment_slug)
+    if isinstance(path, dict):
+        return path
     uri = external_refs.build_hf_uri(repo_type, repo_id, revision)
     computed_meta = {
         **(meta or {}),
@@ -566,7 +762,7 @@ async def register_hf_artifact(
         "hf_repo_type": repo_type,
     }
     body = {"kind": kind, "uri": uri, "bytes": bytes, "name": name, "meta": computed_meta}
-    return await _api_request("POST", f"/v1/runs/{run_id}/artifacts", json=body)
+    return await _api_request("POST", path, json=body)
 
 
 @mcp.tool
@@ -639,6 +835,14 @@ async def get_pin(name: str) -> Any:
         name: Pin name (e.g. "tok-v12-tokenizer:latest")
     """
     return await _api_request("GET", f"/v1/pins/{name}")
+
+
+@mcp.tool
+async def list_pins() -> Any:
+    """Every pin, with enough of its current target (run, kind, uri, the
+    target artifact's own name) to browse without a get_pin call per row —
+    the only way to discover a pin's name today is already knowing it."""
+    return await _api_request("GET", "/v1/pins")
 
 
 @mcp.tool

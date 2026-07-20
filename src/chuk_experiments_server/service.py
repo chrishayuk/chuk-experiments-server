@@ -272,6 +272,12 @@ async def get_experiment(slug: str) -> Experiment:
     )
     experiment["runs"] = [dict(r) for r in run_rows]
 
+    artifact_rows = await pool.fetch(
+        f"SELECT {_ARTIFACT_COLUMNS} FROM artifact WHERE experiment_id = $1 ORDER BY created_at",
+        experiment["id"],
+    )
+    experiment["artifacts"] = [dict(a) for a in artifact_rows]
+
     return Experiment.model_validate(experiment)
 
 
@@ -432,36 +438,56 @@ async def search_experiments(
     return [SearchHit.model_validate(dict(row)) for row in rows]
 
 
-async def get_index(limit: int = MAX_LIST_LIMIT, offset: int = 0) -> list[IndexEntry]:
-    """The full compact catalogue (spec §5a) — small enough that an agent
-    reads the whole thing in one call and does semantic matching itself,
-    in-context, rather than relying on FTS alone. Expected to be the
-    most-used read tool. `limit` defaults to MAX_LIST_LIMIT rather than
-    DEFAULT_LIST_LIMIT — a bounded full scan, not an unbounded one, but
-    still "the whole catalogue in one call" for any realistic experiment
-    count today."""
+async def get_index(
+    limit: int = MAX_LIST_LIMIT, offset: int = 0, programme: str | None = None
+) -> tuple[list[IndexEntry], int]:
+    """A compact, paginated catalogue (spec §5a) — one row per experiment,
+    hypothesis truncated to ~200 chars (full text belongs in
+    get_experiment). Originally framed as "the whole catalogue in one call,
+    small enough to read in full"; that stopped being true well before ~380
+    experiments (250K+ characters, over any reasonable tool-response
+    budget), hence the pagination and the `programme` filter — for
+    structured filtering beyond that (status, tags, conclusion/next-action
+    needed), prefer list_experiments instead; this tool's value is the
+    compact hypothesis+headline-metric projection, not filtering power.
+
+    Returns `(rows, total)` — `total` counts every matching experiment
+    regardless of `limit`/`offset`, computed separately rather than via a
+    window function, since a window function returns nothing to read when
+    the requested page itself is empty (e.g. `offset` past the end) —
+    exactly when a caller most needs to know how many rows actually exist."""
     pool = await get_pool()
+    total_args = [programme] if programme else []
+    total_where = "WHERE p.slug = $1" if programme else ""
+    total = await pool.fetchval(
+        f"SELECT count(*) FROM experiment e JOIN programme p ON p.id = e.programme_id {total_where}",
+        *total_args,
+    )
+
+    page_where = "WHERE p.slug = $3" if programme else ""
     rows = await pool.fetch(
-        """
-        SELECT e.slug, e.title, e.status, e.tags, e.hypothesis,
+        f"""
+        SELECT e.slug, e.title, e.status, e.tags, left(e.hypothesis, 200) AS hypothesis,
                p.slug AS programme_slug,
                (
                    SELECT jsonb_build_object('name', res.name, 'value', res.value, 'verdict', res.verdict)
                    FROM result res
                    JOIN run r ON r.id = res.run_id
-                   WHERE r.experiment_id = e.id
+                   WHERE r.experiment_id = e.id AND res.superseded_by IS NULL
                    ORDER BY res.created_at DESC
                    LIMIT 1
                ) AS headline_metric
         FROM experiment e
         JOIN programme p ON p.id = e.programme_id
+        {page_where}
         ORDER BY e.updated_at DESC
         LIMIT $1 OFFSET $2
         """,
         limit,
         offset,
+        *total_args,
     )
-    return [IndexEntry.model_validate(dict(row)) for row in rows]
+    return [IndexEntry.model_validate(dict(row)) for row in rows], total
 
 
 # ---------------------------------------------------------------------------
@@ -533,8 +559,8 @@ async def get_run(run_id: str) -> Run:
     data["results"] = [
         dict(r)
         for r in await pool.fetch(
-            "SELECT id, run_id, name, value, value_json, verdict, notes, submitted_by, created_at "
-            "FROM result WHERE run_id = $1 ORDER BY created_at",
+            "SELECT id, run_id, name, value, value_json, verdict, notes, submitted_by, created_at, "
+            "superseded_by FROM result WHERE run_id = $1 ORDER BY created_at",
             run_id,
         )
     ]
@@ -577,16 +603,29 @@ async def update_run(run_id: str, data: RunUpdate) -> Run:
 
 
 async def compare_runs(run_ids: list[str], metric: str) -> list[RunComparisonRow]:
+    """One row per requested run, always. `found` distinguishes "this run has
+    no current result under `metric`" from "it does, and the value/verdict
+    happen to be null" — a bare LEFT JOIN can't tell those apart, and an
+    agent asking for a metric that doesn't exist deserves an honest signal
+    rather than an indistinguishable null row.
+
+    `superseded_by IS NULL` in the join excludes corrected-away results, and
+    `DISTINCT ON (r.id)` + `ORDER BY ... created_at DESC` picks the newest
+    current match if `result.name` was ever submitted more than once for the
+    same run (exactly the corrected-result scenario, since nothing enforces
+    uniqueness on (run_id, name))."""
     pool = await get_pool()
     rows = await pool.fetch(
         """
-        SELECT r.id AS run_id, r.slug AS run_slug, e.slug AS experiment_slug,
-               res.value, res.value_json, res.verdict
+        SELECT DISTINCT ON (r.id)
+               r.id AS run_id, r.slug AS run_slug, e.slug AS experiment_slug,
+               res.value, res.value_json, res.verdict, (res.id IS NOT NULL) AS found
         FROM run r
         JOIN experiment e ON e.id = r.experiment_id
-        LEFT JOIN result res ON res.run_id = r.id AND res.name = $2
+        LEFT JOIN result res
+            ON res.run_id = r.id AND res.name = $2 AND res.superseded_by IS NULL
         WHERE r.id = ANY($1::text[])
-        ORDER BY r.id
+        ORDER BY r.id, res.created_at DESC NULLS LAST
         """,
         run_ids,
         metric,
@@ -786,7 +825,7 @@ async def submit_result(run_id: str, submitted_by: str, data: ResultCreate) -> R
         """
         INSERT INTO result (run_id, name, value, value_json, verdict, notes, submitted_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, run_id, name, value, value_json, verdict, notes, submitted_by, created_at
+        RETURNING id, run_id, name, value, value_json, verdict, notes, submitted_by, created_at, superseded_by
         """,
         run_id,
         data.name,
@@ -796,6 +835,35 @@ async def submit_result(run_id: str, submitted_by: str, data: ResultCreate) -> R
         data.notes,
         submitted_by,
     )
+    result = Result.model_validate(dict(row))
+    if data.supersedes is not None:
+        await mark_result_superseded(data.supersedes, result.id)
+    return result
+
+
+async def mark_result_superseded(result_id: int, superseded_by: int) -> Result:
+    """Link an existing result as superseded by a later, corrected one — the
+    standalone form, for marking this retroactively once you realize an
+    older result was wrong. `submit_result`'s `supersedes` param is sugar for
+    calling this immediately after inserting the correction. Both ids must
+    already exist; self-supersession is rejected before it ever reaches the
+    DB's own CHECK constraint, for a clean error instead of a raw one."""
+    if result_id == superseded_by:
+        raise ValidationError("a result cannot supersede itself")
+    pool = await get_pool()
+    superseder_exists = await pool.fetchval("SELECT 1 FROM result WHERE id = $1", superseded_by)
+    if not superseder_exists:
+        raise NotFoundError(f"No result with id {superseded_by}")
+    row = await pool.fetchrow(
+        """
+        UPDATE result SET superseded_by = $2 WHERE id = $1
+        RETURNING id, run_id, name, value, value_json, verdict, notes, submitted_by, created_at, superseded_by
+        """,
+        result_id,
+        superseded_by,
+    )
+    if row is None:
+        raise NotFoundError(f"No result with id {result_id}")
     return Result.model_validate(dict(row))
 
 
@@ -804,7 +872,21 @@ async def submit_result(run_id: str, submitted_by: str, data: ResultCreate) -> R
 # ---------------------------------------------------------------------------
 
 
-async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
+_ARTIFACT_COLUMNS = (
+    "id, run_id, experiment_id, kind, uri, bytes, sha256, meta, created_at, "
+    "name, role, verify_status, verified_at, verify_detail"
+)
+
+
+async def register_artifact(
+    data: ArtifactCreate, *, run_id: str | None = None, experiment_slug: str | None = None
+) -> Artifact:
+    """Register a pointer artifact against exactly one parent — a run (the
+    common case) or, for provenance that exists before any run does (e.g. a
+    pre-registration document), an experiment directly (by slug, resolved to
+    its real id here, matching enqueue_run's own convention)."""
+    if (run_id is None) == (experiment_slug is None):
+        raise ValidationError("register_artifact needs exactly one of run_id or experiment_slug")
     if not data.uri.startswith(VALID_ARTIFACT_URI_PREFIXES):
         raise ValidationError(
             f"Artifact uri '{data.uri}' isn't a real accessible location "
@@ -814,18 +896,25 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
             "file:// path or bare filesystem path, which nobody else can resolve."
         )
     pool = await get_pool()
-    run_exists = await pool.fetchval("SELECT 1 FROM run WHERE id = $1", run_id)
-    if not run_exists:
-        raise NotFoundError(f"No run with id {run_id}")
+    experiment_id = None
+    if run_id is not None:
+        parent_exists = await pool.fetchval("SELECT 1 FROM run WHERE id = $1", run_id)
+        if not parent_exists:
+            raise NotFoundError(f"No run with id {run_id}")
+    else:
+        experiment_id = await pool.fetchval("SELECT id FROM experiment WHERE slug = $1", experiment_slug)
+        if experiment_id is None:
+            raise NotFoundError(f"No experiment with slug '{experiment_slug}'")
 
     async def _insert(role: ArtifactRole) -> Any:
         return await pool.fetchrow(
-            """
-            INSERT INTO artifact (run_id, kind, uri, bytes, sha256, meta, name, role)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail
+            f"""
+            INSERT INTO artifact (run_id, experiment_id, kind, uri, bytes, sha256, meta, name, role)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING {_ARTIFACT_COLUMNS}
             """,
             run_id,
+            experiment_id,
             data.kind.value,
             data.uri,
             data.bytes,
@@ -852,8 +941,7 @@ async def register_artifact(run_id: str, data: ArtifactCreate) -> Artifact:
 async def get_artifact(artifact_id: int) -> Artifact:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, run_id, kind, uri, bytes, sha256, meta, created_at, name, role, verify_status, verified_at, verify_detail "
-        "FROM artifact WHERE id = $1",
+        f"SELECT {_ARTIFACT_COLUMNS} FROM artifact WHERE id = $1",
         artifact_id,
     )
     if row is None:

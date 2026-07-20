@@ -111,6 +111,10 @@ class Experiment(RecordModel):
     programme_name: str
     latest_writeup: Writeup | None = None
     runs: list[RunSummary] = Field(default_factory=list)
+    # Artifacts registered directly against this experiment (no run) — e.g. a
+    # pre-registration document, which needs queryable provenance before any
+    # run exists. Run-scoped artifacts still live under their own run.
+    artifacts: list["Artifact"] = Field(default_factory=list)
 
 
 class ExperimentCreate(BaseModel):
@@ -161,6 +165,11 @@ class Result(RecordModel):
     notes: str | None = None
     submitted_by: str
     created_at: datetime
+    # Set when a later, corrected result supersedes this one — this row's
+    # verdict/value should no longer be trusted on its own. Never client-set
+    # directly at creation; only mark_result_superseded / submit_result's
+    # `supersedes` param write it.
+    superseded_by: int | None = None
 
 
 class ResultCreate(BaseModel):
@@ -169,11 +178,18 @@ class ResultCreate(BaseModel):
     value_json: dict[str, Any] | None = None
     verdict: Verdict | None = None
     notes: str | None = None
+    # The id of an earlier result this one corrects — sugar for submitting
+    # the correction, then linking it back via mark_result_superseded.
+    supersedes: int | None = None
 
 
 class Artifact(RecordModel):
     id: int
-    run_id: str
+    # Exactly one of run_id/experiment_id is ever set (DB CHECK constraint) —
+    # an experiment-level artifact (e.g. a pre-registration document, which
+    # exists before any run does) has no run_id at all.
+    run_id: str | None = None
+    experiment_id: str | None = None
     kind: ArtifactKind
     uri: str
     bytes: int | None = None
@@ -366,6 +382,10 @@ class RunComparisonRow(RecordModel):
     value: float | None = None
     value_json: dict[str, Any] | None = None
     verdict: Verdict | None = None
+    # False means this run has no *current* (non-superseded) result under the
+    # requested metric name at all — distinct from a real null value/verdict
+    # on a result that does exist.
+    found: bool = False
 
 
 # ---------------------------------------------------------------------------

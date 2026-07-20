@@ -311,6 +311,71 @@ decisions made along the way that the spec didn't originally cover.
   gpu-training-harness's own naming for this server) instead, with an
   explicit instruction to never paste the literal key value.
 
+- **MCP tool hardening from a real usage walkthrough** (2026-07-20) — a
+  cold-comprehension pass over 30 unfamiliar experiments plus an operational
+  pass on the live v12-tokenizer programme surfaced three trust/correctness
+  gaps that outrank an earlier static tool-list review, plus confirmed a
+  handful of smaller ones:
+  - **`result.superseded_by`** (migrations 010) — the schema's first
+    self-referential FK. Real incident: result 1139 was contaminated/wrong,
+    corrected by 1141/1142, but the correction existed only in prose — an
+    agent fetching 1139 in isolation, or ranking by verdict, would carry
+    forward a stale "pass". `submit_result` gained a `supersedes` param
+    (sugar for linking at submission time) and a standalone
+    `mark_result_superseded` tool/route (`POST /v1/results/{id}/supersede`)
+    for retroactive linking. Surfaced on every read via `get_run`'s results
+    list; `get_index`'s headline metric and `compare_runs` both now exclude
+    superseded results.
+  - **Structured metrics + honest `compare_runs`** — `submit_result`'s MCP
+    tool was missing `value_json` entirely (despite existing on the model),
+    so a four-way BPB comparison table ended up as unqueryable prose in
+    `notes` — `compare_runs` returned an all-null row for it with no
+    signal. Docstring rewritten with a bad/good example pair (the tok-2b
+    case), matching `create_experiment`'s proven "teach the norm, not just
+    the schema" pattern. `compare_runs`' query fixed to also honestly
+    distinguish "no current result under this metric" (`found: false`)
+    from "found, value happens to be null" — previously indistinguishable,
+    and previously capable of emitting duplicate rows per run when a metric
+    had been submitted more than once (exactly the corrected-result case).
+  - **Explicit empty-result messages** — `search_experiments`/`peek_queue`
+    used to return a bare `[]` indistinguishable between "nothing exists",
+    "wrong query," and "tool failure" (hit more than once in one session,
+    compounded by search being lexical-only — a semantic paraphrase
+    returned nothing for content that existed). Both now wrap as `{results,
+    count, message?}` via a small shared `_listing` helper.
+  - **`get_index` real pagination** — `limit`/`offset` existed at the
+    REST/service layer since a 2026-07-19 fix but were never wired into the
+    MCP tool itself, which took zero parameters; a ~380-experiment
+    catalogue blew the token limit and had to be parsed from a dumped file
+    by hand. Now takes `programme`/`limit`/`offset`, reports `total`
+    (via a separate count query, not `COUNT(*) OVER()`, which returns
+    nothing to read on an empty page), and truncates `hypothesis` to
+    ~200 chars matching `search_experiments`' existing snippet pattern.
+    Docstring rewritten to drop the now-false "small enough to read in
+    full" framing.
+  - **Smaller confirmed items**: `list_pins` (the service/REST layer
+    already existed, unused); a `get_run(summary=True)` mode eliding result
+    `notes` (a single run had ballooned to ~15K tokens); `tags` added to
+    `create_experiment`'s MCP tool (the REST model already accepted them —
+    an MCP-surface gap, not a data-model one); and **first-class
+    experiment-level artifacts** (migration 011) — `artifact.experiment_id`
+    alongside `run_id` (exactly one set, DB-enforced via `(run_id IS NOT
+    NULL) <> (experiment_id IS NOT NULL)`), a new `POST
+    /v1/experiments/{slug}/artifacts` route, and all three registration
+    tools (`register_artifact`/`register_git_artifact`/
+    `register_hf_artifact`) gaining an `experiment_slug` alternative to
+    `run_id` — closing the gap where a pre-registration document (the
+    paradigm experiment-level artifact, since it exists before any run
+    does) had no queryable provenance path at all.
+
+  Versioned design amendments (from the earlier static review) were
+  explicitly dropped after the walkthrough didn't surface them as a real
+  problem. The `body_md`/`body_html` duplication fix (also from that
+  review) shipped anyway, folded into this pass — cheap, and already agreed
+  — even though the walkthrough itself didn't re-flag it: every write-up
+  read/append path now omits `body_html` on the MCP path (the dashboard
+  still gets it via REST directly, where it's actually rendered).
+
 ## Fixed (found via code review, 2026-07-19)
 
 A review of `src/chuk_experiments_server/` (not the SPA, migrations, or

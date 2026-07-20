@@ -280,12 +280,12 @@ async def search(request: Request) -> Response:
 async def index(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.READ)
     params = request.query_params
-    return _ok(
-        await service.get_index(
-            limit=_parse_limit(params.get("limit"), MAX_LIST_LIMIT),
-            offset=_parse_offset(params.get("offset")),
-        )
+    rows, total = await service.get_index(
+        limit=_parse_limit(params.get("limit"), MAX_LIST_LIMIT),
+        offset=_parse_offset(params.get("offset")),
+        programme=params.get("programme"),
     )
+    return _ok({"results": rows, "total": total})
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +380,41 @@ async def run_results(request: Request) -> Response:
     return _ok(await service.submit_result(run_id, key.name, data), status=HTTPStatus.CREATED)
 
 
+@mcp.endpoint("/v1/results/{result_id:int}/supersede", methods=["POST"])
+@_with_error_handling
+async def result_supersede(request: Request) -> Response:
+    """Retroactively link an existing result as superseded — the standalone
+    route for when the correction was already submitted before you realized
+    the old result needed marking (submit_result's own `supersedes` param
+    covers the common case of doing both at once)."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    result_id = request.path_params["result_id"]
+    body = await request.json()
+    superseded_by = int(body["superseded_by"])
+    return _ok(await service.mark_result_superseded(result_id, superseded_by))
+
+
 @mcp.endpoint("/v1/runs/{run_id}/artifacts", methods=["POST"])
 @_with_error_handling
 async def run_artifacts(request: Request) -> Response:
     await auth.require_scope_from_request(request, Scope.WRITE)
     run_id = request.path_params["run_id"]
     data = ArtifactCreate.model_validate(await request.json())
-    return _ok(await service.register_artifact(run_id, data), status=HTTPStatus.CREATED)
+    return _ok(await service.register_artifact(data, run_id=run_id), status=HTTPStatus.CREATED)
+
+
+@mcp.endpoint("/v1/experiments/{slug}/artifacts", methods=["POST"])
+@_with_error_handling
+async def experiment_artifacts(request: Request) -> Response:
+    """Register a pointer artifact directly against an experiment, no run
+    required — for provenance that exists before any run does (e.g. a
+    pre-registration document, the paradigm case: it needs queryable
+    sha256/commit lineage the moment it's written, not "eventually, once a
+    run exists to attach it to")."""
+    await auth.require_scope_from_request(request, Scope.WRITE)
+    slug = request.path_params["slug"]
+    data = ArtifactCreate.model_validate(await request.json())
+    return _ok(await service.register_artifact(data, experiment_slug=slug), status=HTTPStatus.CREATED)
 
 
 @mcp.endpoint("/v1/runs/{run_id}/cancel", methods=["POST"])
@@ -510,7 +538,7 @@ async def _upload_or_dedup_artifact(
         name=name,
         role=resolved_role,
     )
-    return await service.register_artifact(run_id, artifact_data)
+    return await service.register_artifact(artifact_data, run_id=run_id)
 
 
 @mcp.endpoint("/v1/runs/{run_id}/artifacts/upload", methods=["POST"])

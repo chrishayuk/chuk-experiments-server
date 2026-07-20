@@ -258,7 +258,8 @@ async def test_index(api_client, write_key):
     await _create_experiment(api_client, write_key)
     resp = await api_client.get("/v1/index", headers=_auth(write_key))
     assert resp.status_code == HTTPStatus.OK
-    assert [e["slug"] for e in resp.json()] == ["cn-7"]
+    assert [e["slug"] for e in resp.json()["results"]] == ["cn-7"]
+    assert resp.json()["total"] == 1
 
 
 async def test_index_respects_limit_and_offset(api_client, write_key):
@@ -269,8 +270,19 @@ async def test_index_respects_limit_and_offset(api_client, write_key):
     second_page = await api_client.get(
         "/v1/index", params={"limit": 2, "offset": 2}, headers=_auth(write_key)
     )
-    assert len(first_page.json()) == 2
-    assert len(second_page.json()) == 1
+    assert len(first_page.json()["results"]) == 2
+    assert len(second_page.json()["results"]) == 1
+    assert first_page.json()["total"] == 3
+    assert second_page.json()["total"] == 3
+
+
+async def test_index_filters_by_programme(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    await _create_experiment(api_client, write_key, programme="other", slug="other-1")
+
+    resp = await api_client.get("/v1/index", params={"programme": "cn"}, headers=_auth(write_key))
+    assert [e["slug"] for e in resp.json()["results"]] == ["cn-7"]
+    assert resp.json()["total"] == 1
 
 
 async def test_index_rejects_non_numeric_limit(api_client, write_key):
@@ -330,6 +342,66 @@ async def test_submit_result(api_client, write_key):
     )
     assert resp.status_code == HTTPStatus.CREATED
     assert resp.json()["submitted_by"] == "pytest"
+    assert resp.json()["superseded_by"] is None
+
+
+async def test_submit_result_with_supersedes_links_the_old_result(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    old = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/results", json={"name": "bpb", "value": 0.70}, headers=_auth(write_key)
+        )
+    ).json()
+    new = await api_client.post(
+        f"/v1/runs/{run_id}/results",
+        json={"name": "bpb", "value": 0.68, "supersedes": old["id"]},
+        headers=_auth(write_key),
+    )
+    assert new.status_code == HTTPStatus.CREATED
+
+    refetched = await api_client.get(f"/v1/runs/{run_id}", headers=_auth(write_key))
+    old_row = next(r for r in refetched.json()["results"] if r["id"] == old["id"])
+    assert old_row["superseded_by"] == new.json()["id"]
+
+
+async def test_result_supersede_route_links_two_existing_results(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    old = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/results", json={"name": "bpb", "value": 0.70}, headers=_auth(write_key)
+        )
+    ).json()
+    new = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/results", json={"name": "bpb", "value": 0.68}, headers=_auth(write_key)
+        )
+    ).json()
+
+    resp = await api_client.post(
+        f"/v1/results/{old['id']}/supersede",
+        json={"superseded_by": new["id"]},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.json()["superseded_by"] == new["id"]
+
+
+async def test_result_supersede_rejects_self(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    result = (
+        await api_client.post(
+            f"/v1/runs/{run_id}/results", json={"name": "acc", "value": 0.9}, headers=_auth(write_key)
+        )
+    ).json()
+    resp = await api_client.post(
+        f"/v1/results/{result['id']}/supersede",
+        json={"superseded_by": result["id"]},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
 async def test_register_artifact(api_client, write_key):
@@ -341,6 +413,32 @@ async def test_register_artifact(api_client, write_key):
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.CREATED
+    assert resp.json()["experiment_id"] is None
+
+
+async def test_register_experiment_artifact(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    resp = await api_client.post(
+        "/v1/experiments/cn-7/artifacts",
+        json={"kind": "other", "uri": "git+https://github.com/chrishayuk/chuk-mlx@abc123", "name": "prereg"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["run_id"] is None
+    assert body["experiment_id"] is not None
+
+    experiment = await api_client.get("/v1/experiments/cn-7", headers=_auth(write_key))
+    assert [a["id"] for a in experiment.json()["artifacts"]] == [body["id"]]
+
+
+async def test_register_experiment_artifact_missing_experiment_is_404(api_client, write_key):
+    resp = await api_client.post(
+        "/v1/experiments/does-not-exist/artifacts",
+        json={"kind": "other", "uri": "s3://bucket/x"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.NOT_FOUND
 
 
 async def test_register_artifact_accepts_git_uri(api_client, write_key):

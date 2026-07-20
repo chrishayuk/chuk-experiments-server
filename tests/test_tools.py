@@ -10,7 +10,19 @@ from chuk_experiments_server import internal_client, tools
 
 
 async def test_get_index_empty(tool_caller):
-    assert await tools.get_index() == []
+    result = await tools.get_index()
+    assert result["results"] == []
+    assert result["total"] == 0
+    assert "message" in result
+
+
+async def test_get_index_paginates_and_reports_total(tool_caller):
+    for i in range(3):
+        await tools.create_experiment(programme="cn", slug=f"cn-{i}", title="t")
+    page = await tools.get_index(limit=2)
+    assert len(page["results"]) == 2
+    assert page["count"] == 2
+    assert page["total"] == 3
 
 
 async def test_create_experiment_then_get(tool_caller):
@@ -19,6 +31,42 @@ async def test_create_experiment_then_get(tool_caller):
 
     fetched = await tools.get_experiment("cn-7")
     assert fetched["title"] == "t"
+    assert "body_html" not in fetched
+
+
+async def test_create_experiment_accepts_tags(tool_caller):
+    created = await tools.create_experiment(programme="cn", slug="cn-7", title="t", tags=["baseline"])
+    assert created["tags"] == ["baseline"]
+
+
+async def test_append_writeup_omits_body_html(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    result = await tools.append_writeup("cn-7", "the finding")
+    assert result["body_md"] == "the finding"
+    assert "body_html" not in result
+
+
+async def test_get_run_summary_elides_notes(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    await tools.submit_result(run["id"], name="acc", value=0.9, notes="a long interpretation")
+
+    full = await tools.get_run(run["id"])
+    assert full["results"][0]["notes"] == "a long interpretation"
+
+    summary = await tools.get_run(run["id"], summary=True)
+    assert summary["results"][0]["notes"] is None
+    assert summary["results"][0]["value"] == 0.9
+
+
+async def test_list_pins(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    artifact = await tools.register_artifact(kind="checkpoint", uri="s3://bucket/ckpt.bin", run_id=run["id"])
+    await tools.set_pin("latest", artifact["id"])
+
+    pins = await tools.list_pins()
+    assert [p["name"] for p in pins] == ["latest"]
 
 
 async def test_create_experiment_duplicate_returns_error_dict_not_raise(tool_caller):
@@ -39,7 +87,8 @@ async def test_search_experiments_with_filters_dict(tool_caller):
         programme="cn", slug="cn-7", title="fingerprint stuff", hypothesis="fingerprint"
     )
     result = await tools.search_experiments(query="fingerprint")
-    assert [h["slug"] for h in result] == ["cn-7"]
+    assert [h["slug"] for h in result["results"]] == ["cn-7"]
+    assert result["count"] == 1
 
 
 async def test_append_writeup_uses_calling_key_as_author(tool_caller):
@@ -67,7 +116,7 @@ async def test_submit_result_uses_calling_key_as_submitted_by(tool_caller):
 async def test_register_artifact_and_find_checkpoints(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})
-    await tools.register_artifact(run["id"], kind="checkpoint", uri="s3://bucket/ckpt.bin")
+    await tools.register_artifact(kind="checkpoint", uri="s3://bucket/ckpt.bin", run_id=run["id"])
 
     found = await tools.find_checkpoints(kind="checkpoint")
     assert [a["uri"] for a in found] == ["s3://bucket/ckpt.bin"]
@@ -78,7 +127,7 @@ async def test_register_artifact_lineage_and_pins(tool_caller):
     run = await tools.enqueue_run(slug="cn-7", workspec={})
 
     produced = await tools.register_artifact(
-        run["id"], kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"
+        kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness", run_id=run["id"]
     )
 
     lineage = await tools.get_artifact_lineage(produced["id"])
@@ -91,12 +140,35 @@ async def test_register_artifact_lineage_and_pins(tool_caller):
     assert resolved["id"] == produced["id"]
 
 
+async def test_register_artifact_against_experiment_slug(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    artifact = await tools.register_artifact(
+        kind="other", uri="s3://prereg.json", name="prereg", experiment_slug="cn-7"
+    )
+    assert artifact["run_id"] is None
+    assert artifact["experiment_id"] is not None
+
+
+async def test_register_artifact_rejects_neither_parent(tool_caller):
+    result = await tools.register_artifact(kind="other", uri="s3://x")
+    assert "error" in result
+
+
+async def test_register_artifact_rejects_both_parents(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    result = await tools.register_artifact(
+        kind="other", uri="s3://x", run_id=run["id"], experiment_slug="cn-7"
+    )
+    assert "error" in result
+
+
 async def test_register_git_artifact_builds_uri_and_computed_meta(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})
 
     artifact = await tools.register_git_artifact(
-        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123", name="harness"
+        owner="chrishayuk", repo="chuk-mlx", commit="abc123", name="harness", run_id=run["id"]
     )
     assert artifact["uri"] == "git+https://github.com/chrishayuk/chuk-mlx@abc123"
     assert artifact["meta"]["git_repo"] == "chrishayuk/chuk-mlx"
@@ -108,10 +180,10 @@ async def test_register_git_artifact_computed_meta_wins_over_caller_supplied(too
     run = await tools.enqueue_run(slug="cn-7", workspec={})
 
     artifact = await tools.register_git_artifact(
-        run["id"],
         owner="chrishayuk",
         repo="chuk-mlx",
         commit="abc123",
+        run_id=run["id"],
         meta={"git_repo": "attacker/fake", "git_commit": "evil", "extra": "kept"},
     )
     assert artifact["meta"]["git_repo"] == "chrishayuk/chuk-mlx"
@@ -124,8 +196,8 @@ async def test_register_hf_artifact_builds_uri_and_computed_meta(tool_caller):
     run = await tools.enqueue_run(slug="cn-7", workspec={})
 
     artifact = await tools.register_hf_artifact(
-        run["id"],
         repo_id="chrishayuk/granite-4.1-3b-q4k-vindex",
+        run_id=run["id"],
         revision="main",
         repo_type="model",
         kind="checkpoint",
@@ -149,7 +221,7 @@ async def test_verify_artifact_tool_forwards_to_verify_route(tool_caller, monkey
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})
     artifact = await tools.register_git_artifact(
-        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123"
+        owner="chrishayuk", repo="chuk-mlx", commit="abc123", run_id=run["id"]
     )
 
     result = await tools.verify_artifact(artifact["id"])
@@ -161,9 +233,9 @@ async def test_list_external_ref_artifacts_tool_only_returns_git_and_hf(tool_cal
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     run = await tools.enqueue_run(slug="cn-7", workspec={})
     git_artifact = await tools.register_git_artifact(
-        run["id"], owner="chrishayuk", repo="chuk-mlx", commit="abc123"
+        owner="chrishayuk", repo="chuk-mlx", commit="abc123", run_id=run["id"]
     )
-    await tools.register_artifact(run["id"], kind="checkpoint", uri="s3://bucket/ckpt.bin")
+    await tools.register_artifact(kind="checkpoint", uri="s3://bucket/ckpt.bin", run_id=run["id"])
 
     refs = await tools.list_external_ref_artifacts()
     assert [r["id"] for r in refs] == [git_artifact["id"]]
@@ -249,7 +321,15 @@ async def test_peek_queue(tool_caller):
     await tools.create_experiment(programme="cn", slug="cn-7", title="t")
     await tools.enqueue_run(slug="cn-7", workspec={})
     result = await tools.peek_queue()
-    assert len(result) == 1
+    assert result["count"] == 1
+    assert len(result["results"]) == 1
+
+
+async def test_peek_queue_empty_has_explanatory_message(tool_caller):
+    result = await tools.peek_queue()
+    assert result["results"] == []
+    assert result["count"] == 0
+    assert "message" in result
 
 
 async def test_list_programmes(tool_caller):
@@ -275,7 +355,7 @@ async def test_search_experiments_filters_by_tag(tool_caller, api_client, write_
         "/v1/experiments/cn-7", json={"tags": ["baseline"]}, headers={"Authorization": f"Bearer {write_key}"}
     )
     result = await tools.search_experiments(filters={"tags": ["baseline"]})
-    assert [h["slug"] for h in result] == ["cn-7"]
+    assert [h["slug"] for h in result["results"]] == ["cn-7"]
 
 
 async def test_search_experiments_filters_by_config(tool_caller):
@@ -284,7 +364,8 @@ async def test_search_experiments_filters_by_config(tool_caller):
     result = await tools.search_experiments(filters={"config_key": "gpu", "config_value": "a100"})
     # No run has config.gpu = a100, so the structured filter legitimately
     # excludes it — this exercises the filter-building branch, not a match.
-    assert result == []
+    assert result["results"] == []
+    assert "message" in result
 
 
 async def test_search_experiments_filters_by_metric(tool_caller):
@@ -292,7 +373,7 @@ async def test_search_experiments_filters_by_metric(tool_caller):
     run = await tools.enqueue_run(slug="cn-7", workspec={})
     await tools.submit_result(run["id"], name="acc", value=0.9)
     result = await tools.search_experiments(filters={"metric": "acc", "metric_op": "gt", "metric_value": 0.5})
-    assert [h["slug"] for h in result] == ["cn-7"]
+    assert [h["slug"] for h in result["results"]] == ["cn-7"]
 
 
 async def test_api_request_transport_failure_returns_error_dict(monkeypatch, tool_caller):

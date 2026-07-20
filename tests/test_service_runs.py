@@ -31,7 +31,9 @@ async def test_get_run_includes_results_and_artifacts():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     await service.submit_result(run.id, "chris", ResultCreate(name="acc", value=0.9))
-    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+    await service.register_artifact(
+        ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"), run_id=run.id
+    )
 
     fetched = await service.get_run(run.id)
     assert len(fetched.results) == 1
@@ -63,8 +65,64 @@ async def test_compare_runs_across_two_experiments():
 
     comparison = await service.compare_runs([run_a.id, run_b.id], "acc")
     values = {row.run_id: row.value for row in comparison}
+    found = {row.run_id: row.found for row in comparison}
     assert values[run_a.id] == 0.5
     assert values[run_b.id] == 0.8
+    assert found[run_a.id] is True
+    assert found[run_b.id] is True
+
+
+async def test_compare_runs_reports_found_false_when_metric_missing():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    await service.submit_result(run.id, "chris", ResultCreate(name="acc", value=0.5))
+
+    comparison = await service.compare_runs([run.id], "not_a_real_metric")
+    assert len(comparison) == 1
+    assert comparison[0].found is False
+    assert comparison[0].value is None
+
+
+async def test_compare_runs_excludes_superseded_and_picks_latest():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    old = await service.submit_result(run.id, "chris", ResultCreate(name="bpb", value=0.70))
+    new = await service.submit_result(
+        run.id, "chris", ResultCreate(name="bpb", value=0.68, supersedes=old.id)
+    )
+
+    comparison = await service.compare_runs([run.id], "bpb")
+    assert len(comparison) == 1
+    assert comparison[0].found is True
+    assert comparison[0].value == 0.68
+
+    refetched_old = await service.get_run(run.id)
+    old_row = next(r for r in refetched_old.results if r.id == old.id)
+    assert old_row.superseded_by == new.id
+
+
+async def test_mark_result_superseded_rejects_self():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    result = await service.submit_result(run.id, "chris", ResultCreate(name="acc", value=0.5))
+    with pytest.raises(service.ValidationError):
+        await service.mark_result_superseded(result.id, result.id)
+
+
+async def test_mark_result_superseded_missing_result_raises_not_found():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    result = await service.submit_result(run.id, "chris", ResultCreate(name="acc", value=0.5))
+    with pytest.raises(service.NotFoundError):
+        await service.mark_result_superseded(999999999, result.id)
+
+
+async def test_mark_result_superseded_missing_superseder_raises_not_found():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    result = await service.submit_result(run.id, "chris", ResultCreate(name="acc", value=0.5))
+    with pytest.raises(service.NotFoundError):
+        await service.mark_result_superseded(result.id, 999999999)
 
 
 async def test_submit_result_missing_run_raises_not_found():
@@ -77,7 +135,40 @@ async def test_submit_result_missing_run_raises_not_found():
 async def test_register_artifact_missing_run_raises_not_found():
     with pytest.raises(service.NotFoundError):
         await service.register_artifact(
-            "RUN-00000000-000000-absent", ArtifactCreate(kind="checkpoint", uri="s3://x")
+            ArtifactCreate(kind="checkpoint", uri="s3://x"), run_id="RUN-00000000-000000-absent"
+        )
+
+
+async def test_register_artifact_requires_exactly_one_parent():
+    with pytest.raises(service.ValidationError):
+        await service.register_artifact(ArtifactCreate(kind="other", uri="s3://x"))
+
+
+async def test_register_artifact_rejects_both_parents():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    with pytest.raises(service.ValidationError):
+        await service.register_artifact(
+            ArtifactCreate(kind="other", uri="s3://x"), run_id=run.id, experiment_slug="cn-7"
+        )
+
+
+async def test_register_artifact_against_experiment_directly():
+    await _make_experiment()
+    artifact = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="s3://prereg.json", name="prereg"), experiment_slug="cn-7"
+    )
+    assert artifact.run_id is None
+    assert artifact.experiment_id is not None
+
+    experiment = await service.get_experiment("cn-7")
+    assert [a.id for a in experiment.artifacts] == [artifact.id]
+
+
+async def test_register_artifact_missing_experiment_raises_not_found():
+    with pytest.raises(service.NotFoundError):
+        await service.register_artifact(
+            ArtifactCreate(kind="other", uri="s3://x"), experiment_slug="does-not-exist"
         )
 
 
@@ -85,21 +176,25 @@ async def test_register_artifact_rejects_file_uri():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     with pytest.raises(service.ValidationError):
-        await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="file:///tmp/x.txt"))
+        await service.register_artifact(ArtifactCreate(kind="other", uri="file:///tmp/x.txt"), run_id=run.id)
 
 
 async def test_register_artifact_rejects_bare_local_path():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     with pytest.raises(service.ValidationError):
-        await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="/tmp/x.txt"))
+        await service.register_artifact(ArtifactCreate(kind="other", uri="/tmp/x.txt"), run_id=run.id)
 
 
 async def test_register_artifact_accepts_gdrive_and_https_uris():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
-    gdrive = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc123"))
-    https = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="https://example.com/x"))
+    gdrive = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="gdrive://abc123"), run_id=run.id
+    )
+    https = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="https://example.com/x"), run_id=run.id
+    )
     assert gdrive.uri == "gdrive://abc123"
     assert https.uri == "https://example.com/x"
 
@@ -112,8 +207,8 @@ async def test_find_artifact_by_name_sha_finds_matching_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     registered = await service.register_artifact(
-        run.id,
         ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"),
+        run_id=run.id,
     )
     found = await service.find_artifact_by_name_sha("harness", "deadbeef")
     assert found is not None
@@ -125,12 +220,12 @@ async def test_get_artifact_lineage_splits_produced_and_used():
     run_a = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
     produced = await service.register_artifact(
-        run_a.id,
         ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness"),
+        run_id=run_a.id,
     )
     await service.register_artifact(
-        run_b.id,
         ArtifactCreate(kind="other", uri="gdrive://abc", sha256="deadbeef", name="harness", role="used"),
+        run_id=run_b.id,
     )
 
     lineage = await service.get_artifact_lineage(produced.id)
@@ -151,12 +246,12 @@ async def test_register_artifact_produced_race_falls_back_to_used():
     run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
 
     first = await service.register_artifact(
-        run_a.id,
         ArtifactCreate(kind="other", uri="gdrive://a", sha256="deadbeef", name="harness", role="produced"),
+        run_id=run_a.id,
     )
     second = await service.register_artifact(
-        run_b.id,
         ArtifactCreate(kind="other", uri="gdrive://b", sha256="deadbeef", name="harness", role="produced"),
+        run_id=run_b.id,
     )
 
     assert first.role == "produced"
@@ -170,7 +265,9 @@ async def test_register_artifact_produced_race_falls_back_to_used():
 async def test_get_artifact_lineage_empty_for_unnamed_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
-    artifact = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc"))
+    artifact = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="gdrive://abc"), run_id=run.id
+    )
     lineage = await service.get_artifact_lineage(artifact.id)
     assert lineage.produced_by_run_id is None
     assert lineage.used_by_run_ids == []
@@ -186,10 +283,10 @@ async def test_register_git_artifact_dedups_by_name_and_uri_when_no_sha256():
     git_uri = "git+https://github.com/chrishayuk/chuk-mlx@abc123"
 
     produced = await service.register_artifact(
-        run_a.id, ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced")
+        ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced"), run_id=run_a.id
     )
     used = await service.register_artifact(
-        run_b.id, ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced")
+        ArtifactCreate(kind="other", uri=git_uri, name="harness", role="produced"), run_id=run_b.id
     )
 
     assert produced.role == "produced"
@@ -208,16 +305,16 @@ async def test_register_git_artifact_different_uri_same_name_both_produced():
     run_b = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-1"))
 
     first = await service.register_artifact(
-        run_a.id,
         ArtifactCreate(
             kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@commit1", name="harness"
         ),
+        run_id=run_a.id,
     )
     second = await service.register_artifact(
-        run_b.id,
         ArtifactCreate(
             kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@commit2", name="harness"
         ),
+        run_id=run_b.id,
     )
 
     assert first.role == "produced"
@@ -227,8 +324,12 @@ async def test_register_git_artifact_different_uri_same_name_both_produced():
 async def test_pin_set_get_list_and_repoint():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
-    artifact_a = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://a"))
-    artifact_b = await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://b"))
+    artifact_a = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="gdrive://a"), run_id=run.id
+    )
+    artifact_b = await service.register_artifact(
+        ArtifactCreate(kind="other", uri="gdrive://b"), run_id=run.id
+    )
 
     await service.set_pin("harness:latest", artifact_a.id)
     resolved = await service.get_pin("harness:latest")
@@ -259,7 +360,7 @@ async def test_get_artifact_returns_registered_artifact():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     registered = await service.register_artifact(
-        run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin")
+        ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"), run_id=run.id
     )
 
     fetched = await service.get_artifact(registered.id)
@@ -275,8 +376,10 @@ async def test_get_artifact_missing_raises_not_found():
 async def test_find_checkpoints_filters_by_model_and_kind():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0", config={"model": "v11"}))
-    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
-    await service.register_artifact(run.id, ArtifactCreate(kind="log", uri="s3://bucket/train.log"))
+    await service.register_artifact(
+        ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"), run_id=run.id
+    )
+    await service.register_artifact(ArtifactCreate(kind="log", uri="s3://bucket/train.log"), run_id=run.id)
 
     checkpoints = await service.find_checkpoints(model="v11", kind="checkpoint")
     assert [a.uri for a in checkpoints] == ["s3://bucket/ckpt.bin"]
@@ -307,7 +410,7 @@ async def test_verify_artifact_prefers_requesting_users_own_token(monkeypatch):
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     artifact = await service.register_artifact(
-        run.id, ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123")
+        ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123"), run_id=run.id
     )
 
     seen_tokens = []
@@ -330,13 +433,15 @@ async def test_list_external_ref_artifacts_only_includes_git_and_hf():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     git_artifact = await service.register_artifact(
-        run.id, ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123")
+        ArtifactCreate(kind="other", uri="git+https://github.com/chrishayuk/chuk-mlx@abc123"), run_id=run.id
     )
     hf_artifact = await service.register_artifact(
-        run.id, ArtifactCreate(kind="checkpoint", uri="hf://model/chrishayuk/some-model@main")
+        ArtifactCreate(kind="checkpoint", uri="hf://model/chrishayuk/some-model@main"), run_id=run.id
     )
-    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
-    await service.register_artifact(run.id, ArtifactCreate(kind="other", uri="gdrive://abc"))
+    await service.register_artifact(
+        ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"), run_id=run.id
+    )
+    await service.register_artifact(ArtifactCreate(kind="other", uri="gdrive://abc"), run_id=run.id)
 
     refs = await service.list_external_ref_artifacts()
     assert {r.id for r in refs} == {git_artifact.id, hf_artifact.id}
@@ -348,7 +453,8 @@ async def test_list_external_ref_artifacts_respects_limit_and_offset():
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
     for i in range(3):
         await service.register_artifact(
-            run.id, ArtifactCreate(kind="other", uri=f"git+https://github.com/chrishayuk/chuk-mlx@commit{i}")
+            ArtifactCreate(kind="other", uri=f"git+https://github.com/chrishayuk/chuk-mlx@commit{i}"),
+            run_id=run.id,
         )
 
     page = await service.list_external_ref_artifacts(limit=2, offset=0)
@@ -361,5 +467,7 @@ async def test_list_external_ref_artifacts_respects_limit_and_offset():
 async def test_list_external_ref_artifacts_empty_when_none_registered():
     await _make_experiment()
     run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
-    await service.register_artifact(run.id, ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"))
+    await service.register_artifact(
+        ArtifactCreate(kind="checkpoint", uri="s3://bucket/ckpt.bin"), run_id=run.id
+    )
     assert await service.list_external_ref_artifacts() == []
