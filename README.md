@@ -196,10 +196,10 @@ scripts/
   smoke_test.py                          read-only post-deploy schema-drift check (see .github/workflows/ci.yml);
                                           exercises every column added since migration 006 against real prod data
 .github/workflows/
-  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main, followed by
-               `chuk-experiments-server migrate` against production as its own step (idempotent, no
-               manual step to forget), then a read-only smoke test (scripts/smoke_test.py) against
-               production as a second line of defense in case that ever isn't enough
+  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main (migrations
+               apply automatically as part of that deploy — see fly.toml's release_command), then a
+               read-only smoke test (scripts/smoke_test.py) against production as a second line of
+               defense in case schema and deployed code ever disagree for some other reason
   backup.yml   daily pg_dump of production -> gzipped, uploaded to R2, 30-day rotation
 ```
 
@@ -246,24 +246,21 @@ redeploy after code changes:
 fly deploy --app chuk-experiments-server
 ```
 
-**`fly deploy` by itself only restarts the container — it doesn't run
-`migrate` against production.** CI's `deploy` job now runs `migrate`
-automatically as its own step right after deploying (idempotent, safe on
-every push regardless of whether that push carries a schema change), so a
-push to `main` needs nothing further. A **manual** `fly deploy` from your
-own machine still does, though — that step never sees CI's automation:
+`chuk-experiments-server migrate` runs automatically on every deploy —
+CI-driven or a manual `fly deploy` from your own machine, doesn't matter —
+via `fly.toml`'s `[deploy] release_command`, which Fly runs in its own
+ephemeral machine before the new release rolls out, aborting the deploy if
+it fails. Idempotent (`ADD COLUMN IF NOT EXISTS` etc.), so this is safe on
+every deploy regardless of whether that particular push carries a schema
+change at all — nothing further to run by hand.
 
-```bash
-fly deploy --app chuk-experiments-server
-fly ssh console --app chuk-experiments-server -C "chuk-experiments-server migrate"
-```
-
-Forgetting this after a manual deploy means the new tables/columns simply
-don't exist yet on the live DB, which surfaces as a REST 500 the first time
-something touches them — not a crash on deploy. CI's `smoke-test` job
-(`scripts/smoke_test.py`, right after `deploy`) hits production read-only
-and fails loudly if the schema and the deployed code ever disagree, for
-whatever reason — see the 2026-07-20 incident in ROADMAP.md.
+(This used to be a manual post-deploy step someone had to remember, which
+is exactly how the 2026-07-20 incident in ROADMAP.md happened — migration
+011 shipped, the step got missed, and `get_experiment` 500'd for every
+experiment until caught by hand. CI's `smoke-test` job, `scripts/
+smoke_test.py`, still hits production read-only right after every deploy
+as a second line of defense, in case the schema and the deployed code ever
+disagree for some other reason.)
 
 `DATABASE_URL` is already set as a Fly secret. To provision a fresh app from
 scratch elsewhere:

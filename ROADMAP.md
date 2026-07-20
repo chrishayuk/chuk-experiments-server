@@ -635,17 +635,26 @@ splits, not spaghetti:
 
    Structural fix, part 2: that still left a step someone had to
    *remember*, which is exactly how the incident happened in the first
-   place — so `deploy` now runs `chuk-experiments-server migrate` against
-   production itself, as its own step right after `flyctl deploy`, via
-   `flyctl ssh console` (idempotent, safe to run on every push regardless
-   of whether it carries a schema change, needs no secret beyond the
-   `FLY_API_TOKEN` the job already has). `smoke-test` stays as a second
-   line of defense — it now exists to catch whatever the automated
-   `migrate` step itself doesn't (e.g. it failing silently, or a schema
-   change too structural to be a plain additive migration), not to be the
-   primary safety net. Manual `fly deploy` from a local machine still
-   needs the migrate step run by hand afterward — only the CI path is
-   automated (see README.md's Deployed section).
+   place. First attempt — a separate `flyctl ssh console -C
+   "chuk-experiments-server migrate"` step in the CI `deploy` job, right
+   after `flyctl deploy` — shipped, then immediately failed on the very
+   next deploy: `Error: app chuk-experiments-server has no started VMs`.
+   This app autostops idle machines (`fly.toml`'s `min_machines_running =
+   0`), and the app machine had already stopped itself again in the few
+   seconds between the deploy's own health check passing and `ssh console`
+   trying to attach — scale-to-zero and "SSH into the app machine
+   right after deploy" are fundamentally in tension. Real fix: `fly.toml`'s
+   `[deploy] release_command = "chuk-experiments-server migrate"` — Fly's
+   own mechanism for exactly this, running in a dedicated ephemeral machine
+   *before* the new release rolls out to the real (autostop-affected) app
+   machines, and aborting the deploy outright if it fails. Strictly better
+   than the CI-step approach it replaced: unaffected by autostop, needs no
+   `FLY_API_TOKEN`/SSH at all (it's just part of `flyctl deploy` itself),
+   and — unlike the CI step — covers a manual `fly deploy` from a local
+   machine too, closing a gap the CI-only version left open. `smoke-test`
+   stays as a second line of defense, for whatever `release_command` itself
+   doesn't catch (e.g. it failing silently, or a schema change too
+   structural to be a plain additive migration).
 
 ## Next
 

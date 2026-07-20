@@ -57,26 +57,23 @@ jobs:
       - run: flyctl deploy --remote-only --app chuk-experiments-server
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      # Runs against the container just deployed (new code, new migrations/
-      # already baked in) rather than against the CI runner directly, so it
-      # needs no separate DB-connection secret — just the same FLY_API_TOKEN
-      # this job already has. Idempotent (ADD COLUMN IF NOT EXISTS etc.), so
-      # safe on every deploy even when a push carries no schema change at
-      # all. This is what used to be a manual post-deploy step someone had
-      # to remember — see the 2026-07-20 get_experiment incident below.
-      - name: Apply migrations
-        run: flyctl ssh console --app chuk-experiments-server -C "chuk-experiments-server migrate"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        # Migrations now run as part of this deploy itself, via fly.toml's
+        # [deploy] release_command — see that file for why (an earlier
+        # version of this job tried a separate `flyctl ssh console` step
+        # here instead, which failed: this app autostops idle machines
+        # (min_machines_running=0), so the app machine had already stopped
+        # itself again by the time ssh console tried to attach, seconds
+        # after the deploy's own health check passed).
 
   smoke-test:
     # Second line of defense, not the primary fix — migrations now apply
-    # automatically as part of `deploy` above. This still catches whatever
-    # that step doesn't (e.g. it failing silently, or a schema change that
-    # isn't a plain additive migration). See scripts/smoke_test.py and the
-    # 2026-07-20 get_experiment incident (migration 011 shipped, never
-    # applied, get_experiment broke for every experiment until caught by
-    # hand and fixed manually — this workflow automates that fix).
+    # automatically as part of `deploy` above (fly.toml's release_command).
+    # This still catches whatever that doesn't (e.g. it failing silently,
+    # or a schema change too structural to be a plain additive migration).
+    # See scripts/smoke_test.py and the 2026-07-20 get_experiment incident
+    # (migration 011 shipped, never applied, get_experiment broke for every
+    # experiment until caught by hand and fixed manually — this workflow
+    # automates that fix).
     needs: deploy
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest

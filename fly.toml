@@ -1,12 +1,23 @@
-# fly.toml for chuk-experiments-server.
-# Not deployed yet — run `fly launch --no-deploy` to create the app, set
-# secrets (`fly secrets set DATABASE_URL=... EXPERIMENTS_BOOTSTRAP_KEY=...`),
-# then `fly deploy`.
+# fly.toml for chuk-experiments-server. Live at
+# https://chuk-experiments-server.fly.dev — see README.md's "Deployed"
+# section for the full redeploy/provisioning workflow.
 
 app = 'chuk-experiments-server'
 primary_region = 'lhr'
 
 [build]
+
+[deploy]
+  # Runs in its own ephemeral machine before the new release rolls out to
+  # the real app machines, and aborts the deploy if it fails — the right
+  # place for this rather than a separate post-deploy CI step, since it
+  # isn't affected by min_machines_running=0 below (a step that instead
+  # tried `fly ssh console` right after deploy found the app machine had
+  # already autostopped itself again by the time it connected — see the
+  # 2026-07-20 get_experiment incident in ROADMAP.md) and it covers manual
+  # `fly deploy` from a local machine too, not just CI-driven deploys.
+  # Idempotent (ADD COLUMN IF NOT EXISTS etc.), safe on every deploy.
+  release_command = "chuk-experiments-server migrate"
 
 [http_service]
   internal_port = 8000
