@@ -196,9 +196,10 @@ scripts/
   smoke_test.py                          read-only post-deploy schema-drift check (see .github/workflows/ci.yml);
                                           exercises every column added since migration 006 against real prod data
 .github/workflows/
-  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main; a read-only
-               smoke test (scripts/smoke_test.py) against production right after, to catch a forgotten
-               post-deploy `migrate` loudly instead of silently 500ing until someone notices
+  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main, followed by
+               `chuk-experiments-server migrate` against production as its own step (idempotent, no
+               manual step to forget), then a read-only smoke test (scripts/smoke_test.py) against
+               production as a second line of defense in case that ever isn't enough
   backup.yml   daily pg_dump of production -> gzipped, uploaded to R2, 30-day rotation
 ```
 
@@ -245,21 +246,24 @@ redeploy after code changes:
 fly deploy --app chuk-experiments-server
 ```
 
-**`fly deploy` (and CI's deploy job) only restarts the container — neither
-runs `migrate` against production.** A new migration file does nothing in
-production until it's applied explicitly:
+**`fly deploy` by itself only restarts the container — it doesn't run
+`migrate` against production.** CI's `deploy` job now runs `migrate`
+automatically as its own step right after deploying (idempotent, safe on
+every push regardless of whether that push carries a schema change), so a
+push to `main` needs nothing further. A **manual** `fly deploy` from your
+own machine still does, though — that step never sees CI's automation:
 
 ```bash
+fly deploy --app chuk-experiments-server
 fly ssh console --app chuk-experiments-server -C "chuk-experiments-server migrate"
 ```
 
-Forgetting this after a schema change means the new tables/columns simply
+Forgetting this after a manual deploy means the new tables/columns simply
 don't exist yet on the live DB, which surfaces as a REST 500 the first time
-something touches them — not a crash on deploy. Always check whether a
-change needs this step in addition to `deploy`. CI's `smoke-test` job
+something touches them — not a crash on deploy. CI's `smoke-test` job
 (`scripts/smoke_test.py`, right after `deploy`) hits production read-only
-and fails loudly if this step got missed, rather than waiting for someone
-to notice a 500 — see the 2026-07-20 incident in ROADMAP.md.
+and fails loudly if the schema and the deployed code ever disagree, for
+whatever reason — see the 2026-07-20 incident in ROADMAP.md.
 
 `DATABASE_URL` is already set as a Fly secret. To provision a fresh app from
 scratch elsewhere:

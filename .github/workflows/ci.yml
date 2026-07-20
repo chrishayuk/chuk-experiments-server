@@ -57,15 +57,26 @@ jobs:
       - run: flyctl deploy --remote-only --app chuk-experiments-server
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Runs against the container just deployed (new code, new migrations/
+      # already baked in) rather than against the CI runner directly, so it
+      # needs no separate DB-connection secret — just the same FLY_API_TOKEN
+      # this job already has. Idempotent (ADD COLUMN IF NOT EXISTS etc.), so
+      # safe on every deploy even when a push carries no schema change at
+      # all. This is what used to be a manual post-deploy step someone had
+      # to remember — see the 2026-07-20 get_experiment incident below.
+      - name: Apply migrations
+        run: flyctl ssh console --app chuk-experiments-server -C "chuk-experiments-server migrate"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
   smoke-test:
-    # Catches schema drift specifically: a migration merged in the same push
-    # as code that depends on it, but `flyctl deploy` only restarts the
-    # container — it never runs `migrate` against production, so a missed
-    # manual migrate step leaves new columns/tables missing until something
-    # 500s. See scripts/smoke_test.py and the 2026-07-20 get_experiment
-    # incident (migration 011 shipped, never applied, get_experiment broke
-    # for every experiment until caught by hand).
+    # Second line of defense, not the primary fix — migrations now apply
+    # automatically as part of `deploy` above. This still catches whatever
+    # that step doesn't (e.g. it failing silently, or a schema change that
+    # isn't a plain additive migration). See scripts/smoke_test.py and the
+    # 2026-07-20 get_experiment incident (migration 011 shipped, never
+    # applied, get_experiment broke for every experiment until caught by
+    # hand and fixed manually — this workflow automates that fix).
     needs: deploy
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest

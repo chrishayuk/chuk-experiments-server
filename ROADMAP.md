@@ -622,9 +622,9 @@ splits, not spaghetti:
    `get_experiment` call was down, including the dashboard's own
    experiment-detail pages. Fixed immediately by running `migrate` by hand
    (idempotent — applied 001-011, only 011 actually did anything).
-   Structural fix: added `scripts/smoke_test.py`, a read-only script that
-   exercises every column added since migration 006 against real
-   production data (experiment/run/artifact/result joins, not just a
+   Structural fix, part 1: added `scripts/smoke_test.py`, a read-only
+   script that exercises every column added since migration 006 against
+   real production data (experiment/run/artifact/result joins, not just a
    health check), and a new `smoke-test` CI job that runs it immediately
    after `deploy` — so a missed `migrate` step now fails the deploy loudly
    within a minute instead of waiting for someone to notice a 500 in the
@@ -632,6 +632,20 @@ splits, not spaghetti:
    the `CHUK_EXPERIMENTS_SMOKE_KEY` GitHub secret) rather than the
    bootstrap admin key, matching the least-privilege pattern the rest of
    the key system already follows.
+
+   Structural fix, part 2: that still left a step someone had to
+   *remember*, which is exactly how the incident happened in the first
+   place — so `deploy` now runs `chuk-experiments-server migrate` against
+   production itself, as its own step right after `flyctl deploy`, via
+   `flyctl ssh console` (idempotent, safe to run on every push regardless
+   of whether it carries a schema change, needs no secret beyond the
+   `FLY_API_TOKEN` the job already has). `smoke-test` stays as a second
+   line of defense — it now exists to catch whatever the automated
+   `migrate` step itself doesn't (e.g. it failing silently, or a schema
+   change too structural to be a plain additive migration), not to be the
+   primary safety net. Manual `fly deploy` from a local machine still
+   needs the migrate step run by hand afterward — only the CI path is
+   automated (see README.md's Deployed section).
 
 ## Next
 
