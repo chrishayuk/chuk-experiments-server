@@ -606,6 +606,33 @@ splits, not spaghetti:
     tag rendering confirming the server-injected globals reach the split
     files correctly.
 
+## Fixed (production incident, 2026-07-20)
+
+1. **`get_experiment` 500ing for every experiment in production** — caught
+   live via an agent's `get_experiment` MCP call failing with a bare
+   `{"error": "internal_error"}`. Root cause: `migrations/
+   011_experiment_artifacts.sql` (adding `artifact.experiment_id`) and the
+   code depending on it shipped together in `fcea6cd`, but `fly deploy`
+   (and CI's `deploy` job) only restarts the container — it never runs
+   `migrate` against production — and the manual post-deploy `chuk-
+   experiments-server migrate` step got missed. `get_experiment`'s
+   experiment-level-artifacts query (`service/experiments.py`) ran `WHERE
+   experiment_id = $1` unconditionally on every call, so this wasn't a
+   narrow edge case: every `GET /v1/experiments/{slug}` and every MCP
+   `get_experiment` call was down, including the dashboard's own
+   experiment-detail pages. Fixed immediately by running `migrate` by hand
+   (idempotent — applied 001-011, only 011 actually did anything).
+   Structural fix: added `scripts/smoke_test.py`, a read-only script that
+   exercises every column added since migration 006 against real
+   production data (experiment/run/artifact/result joins, not just a
+   health check), and a new `smoke-test` CI job that runs it immediately
+   after `deploy` — so a missed `migrate` step now fails the deploy loudly
+   within a minute instead of waiting for someone to notice a 500 in the
+   wild. Uses a dedicated read-scoped API key (`ci-smoke-test`, stored as
+   the `CHUK_EXPERIMENTS_SMOKE_KEY` GitHub secret) rather than the
+   bootstrap admin key, matching the least-privilege pattern the rest of
+   the key system already follows.
+
 ## Next
 
 1. **Google Drive archival of historical local-disk data** — first pass

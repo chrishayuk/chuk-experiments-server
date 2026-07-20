@@ -193,8 +193,12 @@ scripts/
   _drive_common.py                       shared OAuth/upload/manifest helpers for the archive_* scripts
   _migrate_common.py                     shared HTTP/experiment-creation helpers for the migrate_* scripts
   verify_harness_contract.py             E2E smoke test of the spec §6/§6a queue contract against a live server
+  smoke_test.py                          read-only post-deploy schema-drift check (see .github/workflows/ci.yml);
+                                          exercises every column added since migration 006 against real prod data
 .github/workflows/
-  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main
+  ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main; a read-only
+               smoke test (scripts/smoke_test.py) against production right after, to catch a forgotten
+               post-deploy `migrate` loudly instead of silently 500ing until someone notices
   backup.yml   daily pg_dump of production -> gzipped, uploaded to R2, 30-day rotation
 ```
 
@@ -252,7 +256,10 @@ fly ssh console --app chuk-experiments-server -C "chuk-experiments-server migrat
 Forgetting this after a schema change means the new tables/columns simply
 don't exist yet on the live DB, which surfaces as a REST 500 the first time
 something touches them — not a crash on deploy. Always check whether a
-change needs this step in addition to `deploy`.
+change needs this step in addition to `deploy`. CI's `smoke-test` job
+(`scripts/smoke_test.py`, right after `deploy`) hits production read-only
+and fails loudly if this step got missed, rather than waiting for someone
+to notice a 500 — see the 2026-07-20 incident in ROADMAP.md.
 
 `DATABASE_URL` is already set as a Fly secret. To provision a fresh app from
 scratch elsewhere:
