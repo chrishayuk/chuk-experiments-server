@@ -7,6 +7,7 @@ dashboard's own Google session cookie as an alternative to a bearer token
 for READ-scoped requests, so the browser can call /v1/* directly.
 """
 
+import json
 from http import HTTPStatus
 from pathlib import Path
 
@@ -19,12 +20,40 @@ from .config import settings
 from .constants import (
     OAUTH_STATE_COOKIE_MAX_AGE_SECONDS,
     OAUTH_STATE_COOKIE_NAME,
+    ROLE_ORDER,
+    ROLE_SCOPE_CEILING,
     SESSION_COOKIE_NAME,
     SESSION_MAX_AGE_SECONDS,
+    STATUS_CSS_CLASS,
+    ExperimentStatus,
 )
 from .server import mcp
 
 _templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+
+# app.html's JS, split into per-screen static files (see ROADMAP.md's
+# modularity item) and loaded via plain <script src> — no build step, no
+# bundler, so these are served as-is. Read once at import time (same
+# "compute once, not per-request" pattern as the JSON constants below) into
+# a name->content allowlist: a request for a filename that isn't a key here
+# 404s, which is also what keeps this immune to path traversal — there's no
+# filesystem lookup at request time at all.
+_STATIC_JS = {
+    path.name: path.read_text() for path in (Path(__file__).resolve().parent / "static").glob("*.js")
+}
+
+# Server-injected into app.html's <script> block (see app_shell) instead of
+# being hand-copied as JS literals — these three used to be independently
+# maintained mirrors of the same Python constants, each commented "kept in
+# sync by hand." Computed once at import time; none of this varies by request.
+_STATUS_CLASS_JSON = json.dumps(STATUS_CSS_CLASS)
+_EXPERIMENT_STATUSES_JSON = json.dumps([status.value for status in ExperimentStatus])
+_ROLE_SCOPE_CEILING_JSON = json.dumps(
+    {
+        role.value: [scope.value for scope in sorted(ceiling, key=lambda s: ROLE_ORDER[s])]
+        for role, ceiling in ROLE_SCOPE_CEILING.items()
+    }
+)
 
 
 async def _active_dashboard_email(request: Request) -> str | None:
@@ -116,4 +145,24 @@ async def app_shell(request: Request) -> Response:
     email = await _active_dashboard_email(request)
     if settings.dashboard_auth_configured and email is None:
         return RedirectResponse("/login", status_code=HTTPStatus.FOUND.value)
-    return _templates.TemplateResponse(request, "app.html", {"user_email": email})
+    return _templates.TemplateResponse(
+        request,
+        "app.html",
+        {
+            "user_email": email,
+            "status_class_json": _STATUS_CLASS_JSON,
+            "experiment_statuses_json": _EXPERIMENT_STATUSES_JSON,
+            "role_scope_ceiling_json": _ROLE_SCOPE_CEILING_JSON,
+        },
+    )
+
+
+@mcp.endpoint("/static/{filename}", methods=["GET"])
+async def static_asset(request: Request) -> Response:
+    """Serves app.html's split-out JS files straight from the in-memory
+    _STATIC_JS allowlist built at import time. No caching headers/ETags —
+    this dashboard has no real traffic volume to justify the complexity."""
+    content = _STATIC_JS.get(request.path_params["filename"])
+    if content is None:
+        return Response(status_code=HTTPStatus.NOT_FOUND.value)
+    return Response(content, media_type="application/javascript")

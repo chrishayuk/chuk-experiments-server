@@ -94,7 +94,7 @@ async def _active_dashboard_email(request: Request) -> str | None:
     revoked user's still-unexpired session cookie must stop granting access
     the moment they're revoked, not wait up to 7 days for the cookie to
     expire on its own. Does its own minimal query rather than calling into
-    service.py's richer get_active_user_by_email: service.py already
+    service/'s richer get_active_user_by_email: service/ already
     imports this module (for generate_key/hash_key), so the reverse import
     would be circular — this one raw query is the cheaper side to duplicate."""
     email = webauth.get_authenticated_email(request)

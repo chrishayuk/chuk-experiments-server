@@ -1,8 +1,8 @@
-"""tools.py tests — each tool is called as a plain async function (@mcp.tool
+"""tools/ tests — each tool is called as a plain async function (@mcp.tool
 just wraps-through, per chuk_mcp_server's decorator), with `tool_caller`
 (see conftest.py) wiring its internal REST forwarding to the in-process ASGI
 app and faking the calling agent's bearer token. This exercises the real
-MCP-to-REST forwarding path, not service.py directly."""
+MCP-to-REST forwarding path, not service/ directly."""
 
 import httpx
 
@@ -210,6 +210,24 @@ async def test_register_hf_artifact_builds_uri_and_computed_meta(tool_caller):
     assert artifact["bytes"] == 4_230_000_000
 
 
+async def test_register_git_artifact_against_experiment_slug(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    artifact = await tools.register_git_artifact(
+        owner="chrishayuk", repo="chuk-mlx", commit="abc123", experiment_slug="cn-7"
+    )
+    assert artifact["run_id"] is None
+    assert artifact["experiment_id"] is not None
+
+
+async def test_register_hf_artifact_against_experiment_slug(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    artifact = await tools.register_hf_artifact(
+        repo_id="chrishayuk/granite-4.1-3b-q4k-vindex", experiment_slug="cn-7"
+    )
+    assert artifact["run_id"] is None
+    assert artifact["experiment_id"] is not None
+
+
 async def test_verify_artifact_tool_forwards_to_verify_route(tool_caller, monkeypatch):
     from chuk_experiments_server import external_refs
 
@@ -400,10 +418,85 @@ async def test_api_request_non_json_response_returns_error_dict(monkeypatch, too
     assert result == {"error": "internal_response_not_json"}
 
 
+async def test_drop_body_html_passes_through_non_dict():
+    """Defensive branch: every real caller (get_experiment/append_writeup)
+    only ever gets a dict or an {"error": ...} dict back from _api_request,
+    but _drop_body_html doesn't assume that — prove the non-dict passthrough
+    directly rather than relying on some future caller to exercise it."""
+    from chuk_experiments_server.tools._shared import _drop_body_html
+
+    assert _drop_body_html(["not", "a", "dict"]) == ["not", "a", "dict"]
+    assert _drop_body_html(None) is None
+
+
+async def test_get_experiment_omits_latest_writeup_body_html(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    await tools.append_writeup("cn-7", "# hi")
+    fetched = await tools.get_experiment("cn-7")
+    assert fetched["latest_writeup"]["body_md"] == "# hi"
+    assert "body_html" not in fetched["latest_writeup"]
+
+
+async def test_register_git_artifact_rejects_both_parents(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    result = await tools.register_git_artifact(
+        owner="chrishayuk", repo="chuk-mlx", commit="abc123", run_id=run["id"], experiment_slug="cn-7"
+    )
+    assert "error" in result
+
+
+async def test_register_hf_artifact_rejects_neither_parent(tool_caller):
+    result = await tools.register_hf_artifact(repo_id="chrishayuk/granite-4.1-3b-q4k-vindex")
+    assert "error" in result
+
+
+async def test_upload_artifact_to_drive_forwards_and_registers(tool_caller, monkeypatch):
+    from chuk_experiments_server import drive_storage
+    from chuk_experiments_server.config import settings
+
+    monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
+    monkeypatch.setattr(drive_storage, "get_client", lambda: "fake-service")
+    monkeypatch.setattr(drive_storage, "ensure_folder", lambda service, name, parent_id: "root-folder-id")
+    monkeypatch.setattr(drive_storage, "ensure_folder_path", lambda service, root_id, parts: "leaf-folder-id")
+    monkeypatch.setattr(
+        drive_storage, "upload_bytes", lambda service, filename, content, parent_id: "fake-file-id"
+    )
+
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+
+    result = await tools.upload_artifact_to_drive(
+        run["id"], filename="harness.py", kind="other", name="harness", content_base64="aGVsbG8="
+    )
+    assert result["role"] == "produced"
+    assert result["uri"].startswith("gdrive://")
+
+
+async def test_mark_result_superseded_tool(tool_caller):
+    await tools.create_experiment(programme="cn", slug="cn-7", title="t")
+    run = await tools.enqueue_run(slug="cn-7", workspec={})
+    old = await tools.submit_result(run["id"], name="acc", value=0.1)
+    new = await tools.submit_result(run["id"], name="acc", value=0.9)
+
+    updated = await tools.mark_result_superseded(old["id"], new["id"])
+    assert updated["superseded_by"] == new["id"]
+
+
+async def test_peek_queue_transport_failure_returns_error_dict(monkeypatch, tool_caller):
+    class _RaisingClient:
+        async def request(self, *args, **kwargs):
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(internal_client, "get_client", lambda: _RaisingClient())
+    result = await tools.peek_queue()
+    assert "internal_request_failed" in result["error"]
+
+
 async def test_no_bearer_token_returns_unauthorized_error(monkeypatch, api_client):
     """Without an ambient bearer token (no MCP context set up), the REST
     layer's own auth check fires — same failure any other unauthenticated
-    client would get, no special-casing in tools.py."""
+    client would get, no special-casing in tools/."""
     from chuk_experiments_server import auth, internal_client
 
     internal_client.set_client(api_client)

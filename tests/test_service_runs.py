@@ -1,8 +1,10 @@
+import pydantic
 import pytest
 
 from chuk_experiments_server import service
 from chuk_experiments_server.constants import RunStatus
 from chuk_experiments_server.models import (
+    Artifact,
     ArtifactCreate,
     ExperimentCreate,
     ResultCreate,
@@ -13,6 +15,16 @@ from chuk_experiments_server.models import (
 
 async def _make_experiment(slug: str = "cn-7") -> None:
     await service.create_experiment(ExperimentCreate(programme="cn", slug=slug, title="t"))
+
+
+def test_artifact_verify_status_rejects_values_outside_the_real_literal():
+    """verify_status used to be a bare str — nothing tied it to the actual
+    closed set external_refs.py produces (verified/missing/unverifiable), so
+    a typo'd status would have passed validation silently."""
+    base = {"id": 1, "kind": "other", "uri": "s3://x", "created_at": "2026-01-01T00:00:00Z"}
+    Artifact.model_validate({**base, "verify_status": "verified"})
+    with pytest.raises(pydantic.ValidationError):
+        Artifact.model_validate({**base, "verify_status": "not_a_real_status"})
 
 
 async def test_enqueue_run_missing_experiment_raises_not_found():
@@ -236,7 +248,7 @@ async def test_get_artifact_lineage_splits_produced_and_used():
 async def test_register_artifact_produced_race_falls_back_to_used():
     """Simulates the dedup race directly: two calls both requesting
     role=produced for the identical (name, sha256), as if two concurrent
-    uploads both missed the dedup hit (rest.py's find_artifact_by_name_sha
+    uploads both missed the dedup hit (rest/'s find_artifact_by_name_sha
     check-then-register isn't atomic). The second insert must hit
     idx_artifact_produced_name_sha_unique and gracefully fall back to
     role=used instead of raising — otherwise get_artifact_lineage would
@@ -319,6 +331,64 @@ async def test_register_git_artifact_different_uri_same_name_both_produced():
 
     assert first.role == "produced"
     assert second.role == "produced"
+
+
+async def test_service_register_git_artifact_builds_uri_and_meta():
+    """The URI-building/meta-override logic used to live only in tools.py —
+    a REST-only caller (or any direct service/ caller) had no way to
+    register a git artifact without hand-building the uri. Now it's a real
+    service function."""
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact = await service.register_git_artifact(
+        "chrishayuk", "chuk-mlx", "abc123", name="harness", run_id=run.id
+    )
+    assert artifact.uri == "git+https://github.com/chrishayuk/chuk-mlx@abc123"
+    assert artifact.meta["git_repo"] == "chrishayuk/chuk-mlx"
+    assert artifact.meta["git_commit"] == "abc123"
+    assert artifact.run_id == run.id
+
+
+async def test_service_register_git_artifact_computed_meta_wins():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact = await service.register_git_artifact(
+        "chrishayuk",
+        "chuk-mlx",
+        "abc123",
+        run_id=run.id,
+        meta={"git_repo": "attacker/fake", "git_commit": "evil", "extra": "kept"},
+    )
+    assert artifact.meta["git_repo"] == "chrishayuk/chuk-mlx"
+    assert artifact.meta["git_commit"] == "abc123"
+    assert artifact.meta["extra"] == "kept"
+
+
+async def test_service_register_git_artifact_against_experiment_slug():
+    await _make_experiment()
+    artifact = await service.register_git_artifact(
+        "chrishayuk", "chuk-mlx", "abc123", name="prereg", experiment_slug="cn-7"
+    )
+    assert artifact.run_id is None
+    assert artifact.experiment_id is not None
+
+
+async def test_service_register_hf_artifact_builds_uri_and_meta():
+    await _make_experiment()
+    run = await service.enqueue_run(RunCreate(experiment="cn-7", slug="seed-0"))
+    artifact = await service.register_hf_artifact(
+        "chrishayuk/granite-4.1-3b-q4k-vindex",
+        run_id=run.id,
+        revision="main",
+        repo_type="model",
+        kind="checkpoint",
+        bytes=4_230_000_000,
+    )
+    assert artifact.uri == "hf://model/chrishayuk/granite-4.1-3b-q4k-vindex@main"
+    assert artifact.meta["hf_repo_id"] == "chrishayuk/granite-4.1-3b-q4k-vindex"
+    assert artifact.meta["hf_revision"] == "main"
+    assert artifact.meta["hf_repo_type"] == "model"
+    assert artifact.bytes == 4_230_000_000
 
 
 async def test_pin_set_get_list_and_repoint():

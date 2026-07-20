@@ -49,7 +49,7 @@ def _serve(host: str, port: int, log_level: str) -> None:
     from . import tools  # noqa: F401 - imported for its @mcp.tool side effects
     from .server import mcp
 
-    # tools.py/web.py call this server's own REST API over HTTP (see
+    # tools/ calls this server's own REST API over HTTP (see
     # internal_client.py) — point that loopback client at whatever port
     # we're actually about to bind, rather than a hardcoded default.
     os.environ.setdefault("INTERNAL_API_BASE_URL", f"http://127.0.0.1:{port}")

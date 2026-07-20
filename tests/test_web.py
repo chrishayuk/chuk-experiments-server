@@ -1,7 +1,8 @@
-"""Dashboard route tests. web.py now serves just the OAuth flow plus a
-single SPA-shell route (templates/app.html) — all data pages are client-side
-JS fetching /v1/* directly, already covered by test_rest.py/test_auth.py, so
-there's nothing page-content-specific left to test at the HTTP level here."""
+"""Dashboard route tests. web.py serves the OAuth flow, the SPA-shell route
+(templates/app.html), and the split-out static JS it loads — all data pages
+are client-side JS fetching /v1/* directly, already covered by
+test_rest.py/test_auth.py, so there's nothing page-content-specific left to
+test at the HTTP level beyond that."""
 
 from http import HTTPStatus
 
@@ -51,6 +52,18 @@ async def test_overview_shell_omits_user_span_when_dashboard_auth_not_configured
     monkeypatch.setattr(type(settings), "dashboard_auth_configured", property(lambda self: False))
     resp = await dashboard_client.get("/")
     assert "Sign out" not in resp.text
+
+
+async def test_overview_shell_injects_status_enum_constants(dashboard_client, authenticated_cookies):
+    """STATUS_CLASS/EXPERIMENT_STATUSES/ROLE_SCOPE_CEILING used to be
+    hand-copied JS literals kept in sync by hand — now server-injected from
+    the real Python constants, so prove the actual values land in the
+    rendered page rather than an empty/broken template substitution."""
+    resp = await dashboard_client.get("/", cookies=authenticated_cookies)
+    assert resp.status_code == HTTPStatus.OK
+    assert '"completed": "good"' in resp.text
+    assert '"draft", "planned", "running", "completed", "abandoned", "superseded"' in resp.text
+    assert '"admin": ["read", "write", "admin"]' in resp.text
 
 
 async def test_login_page_redirects_if_already_authenticated(dashboard_client, authenticated_cookies):
@@ -150,3 +163,26 @@ async def test_auth_callback_rejects_non_allowed_email(dashboard_client, monkeyp
     )
     assert resp.status_code == HTTPStatus.FOUND
     assert "not+authorized" in resp.headers["location"]
+
+
+# --- Static assets -----------------------------------------------------------
+
+
+async def test_static_asset_serves_known_js_file(dashboard_client):
+    """No auth gate on these — they're the same app.html JS every visitor
+    already gets inline before the split into static/*.js files."""
+    resp = await dashboard_client.get("/static/app-core.js")
+    assert resp.status_code == HTTPStatus.OK
+    assert resp.headers["content-type"].startswith("application/javascript")
+    assert "function pagerHtml" in resp.text
+
+
+async def test_static_asset_unknown_filename_404s(dashboard_client):
+    """The allowlist built at import time (see web.py's _STATIC_JS) is the
+    whole path-traversal defense — an unrecognized filename never reaches a
+    filesystem lookup at all, it just isn't a dict key."""
+    resp = await dashboard_client.get("/static/../../etc/passwd")
+    assert resp.status_code == HTTPStatus.NOT_FOUND
+
+    resp = await dashboard_client.get("/static/nonexistent.js")
+    assert resp.status_code == HTTPStatus.NOT_FOUND

@@ -1,7 +1,7 @@
 """Test fixtures.
 
 Integration-style: tests run against a real Postgres (the same
-docker-compose instance used for local dev), not a mocked DB — service.py is
+docker-compose instance used for local dev), not a mocked DB — service/ is
 thin SQL, there's no ORM layer worth mocking, and the interesting bugs here
 (unique-violation handling, the queue's dependency-readiness SQL, atomic
 claim) only show up against a real database.
@@ -72,7 +72,7 @@ async def _clean_tables(_apply_schema):
 @pytest.fixture
 async def write_key(_clean_tables):
     """An API key with read+write+admin scope, for tests that need auth
-    context — most service.py tests call service functions directly and
+    context — most service/ tests call service functions directly and
     don't need this, but auth.py tests do. Depends explicitly on
     `_clean_tables` so the key is created *after* the per-test truncate,
     not before it (autouse fixture ordering isn't otherwise guaranteed)."""
@@ -86,7 +86,7 @@ async def write_key(_clean_tables):
 @pytest.fixture(scope="session")
 def asgi_app(_apply_schema):
     """The real Starlette app built from whatever's registered in
-    chuk_mcp_server's endpoint registry at this point — importing rest.py
+    chuk_mcp_server's endpoint registry at this point — importing rest/
     and web.py (whose @mcp.endpoint decorators fire at module-import time,
     same two modules cli.py's _register_rest_routes imports) is what
     populates it. No mcp.run(): that starts a real uvicorn listener, which
@@ -103,8 +103,8 @@ def asgi_app(_apply_schema):
 @pytest.fixture
 async def api_client(asgi_app):
     """An httpx client wired to the in-process ASGI app instead of a real
-    socket — used both for testing rest.py directly and as the transport
-    tools.py's internal client is pointed at in tests (see test_tools.py)."""
+    socket — used both for testing rest/ directly and as the transport
+    tools/'s internal client is pointed at in tests (see test_tools.py)."""
     import httpx
 
     transport = httpx.ASGITransport(app=asgi_app)
@@ -114,7 +114,7 @@ async def api_client(asgi_app):
 
 @pytest.fixture
 async def tool_caller(api_client, write_key, monkeypatch):
-    """Wires internal_client (what tools.py forwards through) to the
+    """Wires internal_client (what tools/ forwards through) to the
     in-process ASGI transport, and fakes auth.bearer_from_mcp_context() to
     return `write_key` — standing in for chuk_mcp_server's ambient HTTP
     context, which a plain pytest call doesn't have. Yields the raw key in

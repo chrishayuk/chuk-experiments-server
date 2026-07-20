@@ -1,4 +1,4 @@
-"""service.py's users/API-key self-service functions — direct calls, no HTTP
+"""service/'s users/API-key self-service functions — direct calls, no HTTP
 layer (that's test_rest.py's job for the auth-gating half)."""
 
 import asyncio

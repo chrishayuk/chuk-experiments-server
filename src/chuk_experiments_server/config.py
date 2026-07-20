@@ -166,9 +166,9 @@ class Settings:
     def token_encryption_configured(self) -> bool:
         return bool(self.token_encryption_key)
 
-    # --- Internal API access (tools.py) --------------------------------------
+    # --- Internal API access (tools/) --------------------------------------
     # MCP tools call this server's own REST API over HTTP rather than
-    # service.py directly — see internal_client.py.
+    # service/ directly — see internal_client.py.
 
     @property
     def internal_api_base_url(self) -> str:
@@ -183,7 +183,7 @@ class Settings:
         authenticate. Kept only so existing Fly secrets/test fixtures don't
         need touching for this alone; safe to remove entirely in a future
         cleanup pass. MCP tools never used this either — they forward the
-        calling agent's own key instead (see tools.py)."""
+        calling agent's own key instead (see tools/)."""
         return os.environ.get("INTERNAL_API_KEY")
 
 

@@ -66,7 +66,7 @@ where = ["src"]
 include = ["chuk_experiments_server*"]
 
 [tool.setuptools.package-data]
-chuk_experiments_server = ["templates/*.html"]
+chuk_experiments_server = ["templates/*.html", "static/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

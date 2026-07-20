@@ -1,6 +1,6 @@
 """Pydantic models. These are the single source of truth for shape + validation —
 REST endpoints parse request bodies into the `*Create`/`*Update` models below,
-MCP tools build the same models from their keyword arguments, and `service.py`
+MCP tools build the same models from their keyword arguments, and `service/`
 returns the entity models to both callers. Nothing downstream re-validates."""
 
 from datetime import datetime
@@ -18,6 +18,7 @@ from .constants import (
     Scope,
     Verdict,
 )
+from .external_refs import VerifyStatus
 
 
 class RecordModel(BaseModel):
@@ -200,7 +201,7 @@ class Artifact(RecordModel):
     role: ArtifactRole = ArtifactRole.PRODUCED
     #: Set only by service.verify_artifact (external_refs.py) for git+/hf://
     #: reference artifacts — never caller-settable via ArtifactCreate.
-    verify_status: str | None = None
+    verify_status: VerifyStatus | None = None
     verified_at: datetime | None = None
     verify_detail: str | None = None
 
@@ -217,6 +218,33 @@ class ArtifactCreate(BaseModel):
     #: need one.
     name: str | None = None
     role: ArtifactRole = ArtifactRole.PRODUCED
+
+
+class GitArtifactCreate(BaseModel):
+    """Request body for POST .../artifacts/git — server builds the
+    git+https://... uri and git_repo/git_commit meta, matching
+    service.register_git_artifact."""
+
+    owner: str
+    repo: str
+    commit: str
+    kind: ArtifactKind = ArtifactKind.OTHER
+    name: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class HfArtifactCreate(BaseModel):
+    """Request body for POST .../artifacts/hf — server builds the
+    hf://... uri and hf_repo_id/hf_revision/hf_repo_type meta, matching
+    service.register_hf_artifact."""
+
+    repo_id: str
+    revision: str = "main"
+    repo_type: str = "model"
+    kind: ArtifactKind = ArtifactKind.OTHER
+    bytes: int | None = None
+    name: str | None = None
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArtifactPresignRequest(BaseModel):
@@ -309,7 +337,7 @@ class ExternalRefSummary(RecordModel):
     name: str | None = None
     role: ArtifactRole
     meta: dict[str, Any] = Field(default_factory=dict)
-    verify_status: str | None = None
+    verify_status: VerifyStatus | None = None
     verified_at: datetime | None = None
     verify_detail: str | None = None
     created_at: datetime

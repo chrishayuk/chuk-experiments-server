@@ -1,7 +1,8 @@
 """Internal HTTP client for calling this server's own REST API — used by
-tools.py (MCP tools) and web.py (dashboard) so every consumer goes through
-the exact same code path as an external REST client, rather than each
-surface reaching into service.py with its own calling convention.
+tools/ (MCP tools) so that surface goes through the exact same code path
+as an external REST client, rather than reaching into service/ with its
+own calling convention. The dashboard SPA doesn't use this at all — its
+JS calls /v1/* directly from the browser, no server-side proxy.
 
 Loopback by default: MCP tools and dashboard routes run in the same process
 as the REST endpoints, so this targets 127.0.0.1 on this process's own port

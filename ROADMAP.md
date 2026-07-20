@@ -6,7 +6,7 @@ decisions made along the way that the spec didn't originally cover.
 ## Done
 
 - **Phase 0/1** — Postgres schema, REST API (spec §4), MCP read/write tool
-  set (spec §5), all sharing one service layer (`service.py`).
+  set (spec §5), all sharing one service layer (`service/`).
 - **§6a queue/lease system** — pulled forward from Phase 3 since it lives in
   the same `run` table: atomic claim (`FOR UPDATE SKIP LOCKED` + greedy
   bin-packing by priority/`est_seconds`), dependency-gated readiness,
@@ -55,10 +55,10 @@ decisions made along the way that the spec didn't originally cover.
   plan this project is on, not a real backup. A scheduled job `pg_dump`s
   production, gzips it, uploads to the existing R2 bucket under `backups/`,
   and prunes anything older than 30 days.
-- **REST-API-only architecture** — MCP tools (`tools.py`) call this server's
+- **REST-API-only architecture** — MCP tools (`tools/`) call this server's
   own REST API over real HTTP (`internal_client.py`, a loopback `httpx`
   client), forwarding the calling agent's own bearer token, never
-  `service.py` directly. The dashboard now does the same thing one layer
+  `service/` directly. The dashboard now does the same thing one layer
   further out: the browser itself calls `/v1/*` directly (its Google
   session cookie satisfies `Scope.READ`), no server-side proxy at all. One
   code path for auth/validation regardless of which surface is calling.
@@ -431,6 +431,180 @@ code before fixing, each verified with a new regression test:
    Fixed with `limit`/`offset` (default `MAX_LIST_LIMIT`, so today's
    dataset size sees no behavior change) on both the service function and
    `GET /v1/index`.
+
+## Code quality backlog (full review, 2026-07-20)
+
+Not a bug hunt — modularity, decoupling, file size, and magic strings/
+numbers, across `service.py`/`rest.py`/`tools.py`/`models.py`/`app.html`.
+Architecture itself is sound (clean layering, no circular coupling,
+verified the framework's import-time `@mcp.endpoint`/`@mcp.tool`
+registration doesn't block splitting any of the big files into packages).
+The real theme is **duplication, not disorganization**: the same fact
+stated in 2-6 places with nothing tying them together. Ordered
+most-severe-first; checked off as fixed.
+
+**Cross-layer duplication/gaps**
+1. [x] The "exactly one of run_id/experiment_slug" invariant for
+   `register_artifact` is implemented independently in both
+   `tools.py:497` (`_artifact_parent_path`) and `service.py:888`, with
+   different error text. Both layers still need to enforce it (tools.py
+   must pick a URL before it can even call REST) but now share one
+   `ARTIFACT_EXACTLY_ONE_PARENT_ERROR` constant, so they say it identically.
+2. [x] `register_git_artifact`/`register_hf_artifact`'s URI-building +
+   meta-override logic (`tools.py:706`) exists *only* in the MCP layer —
+   `rest.py` never imports `external_refs`, so a REST-only caller can't
+   register a git/hf artifact correctly at all. Fixed properly: promoted to
+   real `service.register_git_artifact`/`register_hf_artifact` functions,
+   with 4 new REST routes (`POST .../artifacts/git`, `.../artifacts/hf`,
+   run- and experiment-scoped) — `tools.py`'s versions are thin wrappers
+   over these again, same as everything else.
+
+**Magic strings/numbers**
+3. [x] Run-status values as raw SQL string literals (`'queued'`,
+   `'claimed'`, ...) in `_READY_CLAUSE`/`claim_queue`/
+   `sweep_expired_leases` (`service.py:660` on), while other functions in
+   the same file correctly use `RunStatus.X.value`. Also fixed the same
+   pattern for `ArtifactRole`/admin-`Scope` raw strings found alongside it.
+4. [x] Hypothesis/snippet truncation length (`200`) duplicated as a bare
+   literal in `search_experiments` and `get_index` (`service.py:420`),
+   added in different sessions, no shared constant. Now
+   `SNIPPET_TRUNCATE_CHARS` in `constants.py`.
+5. [x] The 32KB inline-upload cap's value is restated as prose in six
+   places (`rest.py:85` comment + four `tools.py` docstrings) instead of
+   one source — the code's own comment already admits this. Promoted to a
+   real importable `MAX_INLINE_BASE64_BYTES` in `constants.py`; the four
+   `tools.py` mentions collapsed to one canonical statement (in
+   `upload_artifact_to_drive`) plus cross-references from the rest.
+6. [x] `Artifact.verify_status`/`ExternalRefSummary.verify_status`
+   (`models.py:203`) typed as bare `str` instead of reusing
+   `external_refs.py`'s own `Literal["verified","missing","unverifiable"]`.
+   Now both fields use that same `VerifyStatus` type.
+7. [x] Three Python-side constants/enums hand-copied as JS literals in
+   `app.html:179` on (`STATUS_CSS_CLASS`, `ExperimentStatus`,
+   `ROLE_SCOPE_CEILING`), each commented "kept in sync by hand" — even
+   though `app.html` is already Jinja2-rendered server-side. Now
+   server-injected as JSON from `web.py`'s `app_shell` (computed once at
+   import time) — no hand-copied mirrors left. Browser-verified: all three
+   render with real values and zero console errors on Overview/Team.
+
+**Duplication**
+8. [x] The `bind(value)` SQL-placeholder closure copy-pasted verbatim in 4
+   functions (`service.py:176` on: `list_experiments`,
+   `search_experiments`, `peek_queue`, `find_checkpoints`). Extracted to a
+   shared `_QueryBuilder` class.
+9. [x] The programme/status/tags WHERE-clause filter blocks duplicated
+   char-for-char between `list_experiments` and `search_experiments`
+   (`service.py:181`). Extracted to `_apply_experiment_filters`.
+10. [x] The `result` column list hand-written 3 times with no constant
+    (`service.py:562`: `get_run`, `submit_result`,
+    `mark_result_superseded`) — unlike run/artifact, which each got a
+    partial `_X_COLUMNS` constant. Now `_RESULT_COLUMNS`.
+11. [x] The artifact column list (without `experiment_id`) duplicated as a
+    raw string in 4 places (`service.py:570` on) even though
+    `_ARTIFACT_COLUMNS` already exists for a near-identical variant.
+    `_ARTIFACT_COLUMNS` rebuilt from a single `_ARTIFACT_COLUMN_NAMES`
+    tuple, plus a new `_artifact_columns(alias)` for the JOIN-aliased case
+    (`find_checkpoints`) — one source of truth for both shapes.
+12. [x] `externalRefCell()`/`formatArtifactUri()` (`app.html:154`,
+    `518`) are two independent implementations of the same "artifact →
+    GitHub/HF link" feature, already diverged: `loadPins` uses the old one,
+    every other screen uses the new one. `formatArtifactUri` deleted;
+    `externalRefCell` gained a uri-regex fallback for callers with no
+    `meta` (pins) so it's the one implementation everywhere. Browser-
+    verified on Pins and External-refs against real seeded git+/hf://
+    artifacts — links render correctly, no console errors.
+13. [x] Empty-state table fallback pattern repeated 10× across `app.html`
+    screens (`app.html:253` on), varying only in `colspan`/message.
+    Extracted `emptyRow`/`renderRows` helpers, applied at all 10 sites.
+
+**Long functions**
+14. [x] `claim_queue` (`service.py:702`, 52 lines) mixes transaction/
+    row-locking, an in-Python bin-packing algorithm, a bulk UPDATE, and a
+    per-id re-fetch loop in one function — the bin-packing logic can't be
+    unit-tested apart from the DB transaction around it. Extracted to pure
+    `_pack_runs_by_session_budget`, with its own direct unit tests
+    (no DB) alongside `claim_queue`'s existing transaction-level tests.
+15. [x] `run_artifacts_upload_raw` (`rest.py:630`, 60 lines) inline-
+    validates 5 independent multipart form fields, each with its own
+    ad-hoc error branch, before delegating to the shared upload logic.
+    Extracted `_parse_upload_raw_form`. Caught and fixed a real bug from
+    this refactor before it shipped: the route decorators briefly ended up
+    on the wrong function — full suite + a manual re-check confirmed it
+    before moving on.
+
+**Modularity (file size)** — lower urgency than the above; nothing's
+actively breaking from size alone, but all three were confirmed as clean
+splits, not spaghetti:
+16. [x] `service.py` (1370 lines) mixes 8 bounded contexts (programmes,
+    experiments, runs, queue, results, artifacts, users/keys, tokens) —
+    its own section comments already outline the split; the cross-seam
+    call graph is a DAG (2 import edges), not spaghetti. Converted to a
+    `service/` package: `_shared.py` (exceptions, `_QueryBuilder`,
+    `_generate_ref`), `programmes.py`, `results.py`, `users.py` (+
+    per-user tokens), `artifacts.py`, `runs.py` (+ queue), `experiments.py`,
+    with `__init__.py` now a thin re-export module (`from .artifacts import
+    register_artifact as register_artifact, ...`) so every external caller
+    (`rest.py`, `web.py`, `cli.py`, `errors.py`, tests) keeps working
+    unchanged via `service.<name>` attribute access — confirmed by grepping
+    every `service.` reference across `src/`/`tests/` before wiring the
+    re-exports. Done as a byte-identical move first (file → package, fixed
+    `.` → `..` relative imports, full suite green), then extracted one
+    domain at a time in dependency order (`_shared` → `programmes`/
+    `results`/`users` → `artifacts` → `runs`/`experiments`), running
+    `ruff check`/`ruff format`/the full test suite after each extraction —
+    439/439 passing throughout, zero behavior changes.
+17. [x] `rest.py`/`tools.py` (876/897 lines) each mix ~8-9 route/tool
+    groups; artifacts alone is 37%/30% of each file. Split both into
+    `rest/`/`tools/` packages by the same 8 domains as `service/`
+    (programmes, experiments, search/index, queue, runs, artifacts, pins,
+    users — `tools/` has no `users` submodule, matching the existing
+    "no MCP tool wraps dashboard user/key/token self-service" design).
+    Verified before splitting that route order only matters for 2 literal-
+    vs-parameterized pairs (`/v1/experiments/health` vs `/v1/experiments/
+    {slug}`, `/v1/runs/compare` vs `/v1/runs/{run_id}`, per
+    `chuk_mcp_server`'s registry being a plain insertion-ordered dict
+    handed straight to Starlette) — both pairs land inside the same
+    submodule, so cross-submodule import order in `rest/__init__.py` is
+    provably irrelevant and needed no special handling; `@mcp.tool` in
+    `tools/` registers by name, so no ordering constraint existed there at
+    all. `rest/__init__.py`/`tools/__init__.py` re-export every route/tool
+    (module-qualified access, same reasoning as `service/`); updated 3
+    `tests/test_rest.py` monkeypatches that poked `rest.MAX_INLINE_BASE64_BYTES`/
+    `rest._MAX_UPLOAD_BYTES` directly to target `rest.artifacts.*` instead,
+    since those are module-global reads inside the moved handler functions,
+    not something a re-export alone fixes. 439/439 passing, ruff clean, no
+    behavior changes.
+18. [x] `app.html`'s `<script>` block (625 of 777 lines, zero server-side
+    templating inside it) could split into plain static `.js` files at
+    zero cost to the "no build step" goal — one file currently covers 7
+    independent screens plus shared utilities and the router. Split into
+    `static/app-core.js` (shared utilities: `$`, `esc`, `api`, `pill`,
+    `pagerHtml`, `renderKV`, ...), one file per screen (`app-overview.js`,
+    `app-experiments.js` [list + detail], `app-runs.js`, `app-search.js`,
+    `app-pins.js`, `app-external-refs.js`, `app-team.js`), and
+    `app-router.js` (the hash router, loaded last since it references every
+    `load*` function). The 3 genuinely server-injected constants
+    (`STATUS_CLASS`/`EXPERIMENT_STATUSES`/`ROLE_SCOPE_CEILING`, sourced from
+    Python enums via `web.py`'s `app_shell`) stay in a small inline
+    `<script>` in `app.html` itself — real templating, can't move to a
+    static file — with the static files loaded after it via plain
+    `<script src>` tags in dependency order; classic (non-module) scripts
+    share one global scope, so later files see the earlier ones' top-level
+    `const`/`function` declarations with no explicit wiring needed. Added
+    `web.py`'s `/static/{filename}` route: static JS content is read once
+    into an in-memory `{filename: content}` dict at import time (same
+    "compute once" pattern as the JSON-constants dict already there) —
+    doubles as the security boundary, since a request for any filename not
+    already a dict key 404s with no filesystem lookup at request time at
+    all, so path traversal has nothing to reach. Added `static/*.js` to
+    `[tool.setuptools.package-data]` alongside the existing
+    `templates/*.html` entry; the Dockerfile needed no change since it
+    already `COPY`s the whole `src/` tree rather than naming files. 439/439
+    passing; manually verified in a real headless-Chromium session against
+    local Postgres (Overview/Experiments/Search/Pins/External-refs/Team, all
+    6 screens) — zero console/page errors, correct status-pill colors and
+    tag rendering confirming the server-injected globals reach the split
+    files correctly.
 
 ## Next
 

@@ -1,4 +1,4 @@
-"""The shared ChukMCPServer instance. `rest.py` and `tools.py` both import
+"""The shared ChukMCPServer instance. `rest/` and `tools/` both import
 `mcp` from here and decorate it — this module owns none of the route/tool
 logic itself, so it stays a stable import target for both surfaces."""
 

@@ -115,6 +115,11 @@ DEFAULT_LIST_LIMIT = 50
 DEFAULT_SEARCH_LIMIT = 20
 MAX_LIST_LIMIT = 500
 
+#: Truncation length for hypothesis/title text in compact row projections
+#: (search_experiments' snippet, get_index's hypothesis) — full text always
+#: belongs in get_experiment instead.
+SNIPPET_TRUNCATE_CHARS = 200
+
 #: list_experiments' sort param, allow-listed against real SQL column
 #: expressions — never interpolate a caller-supplied column name directly,
 #: same defensive pattern as METRIC_OP_SQL for search's metric operator.
@@ -212,6 +217,27 @@ VALID_ARTIFACT_URI_PREFIXES = (
     *GIT_URI_PREFIXES,
     HF_URI_PREFIX,
 )
+
+#: Hard cap for the JSON/base64 artifact-upload routes specifically (upload,
+#: upload-batch — the ones an MCP tool call hits, where content_base64 is a
+#: literal tool-call argument the calling model must emit as text, landing
+#: in that model's own transcript regardless of outcome). Kept small on
+#: purpose so an oversized call is rejected deterministically instead of
+#: relying on the model to judge "small enough" for itself. upload-raw
+#: (multipart, streamed from disk) and the R2 presign flow never route
+#: bytes through a model's context either way, so they keep a much larger
+#: ceiling instead (rest/artifacts.py's own _MAX_UPLOAD_BYTES). A single
+#: importable constant — rest/ enforces it, tools/'s upload_artifact_to_drive
+#: docstring states it — so there's one number to change, not several
+#: independently-worded copies.
+MAX_INLINE_BASE64_BYTES = 32 * 1024
+
+#: register_artifact needs exactly one parent — shared between tools/
+#: (which must pick a REST path before it can even make the call) and
+#: service/ (the actual enforcement point, reachable directly by any
+#: REST caller) so both layers give the identical message for the same
+#: input, rather than two independently-worded checks drifting apart.
+ARTIFACT_EXACTLY_ONE_PARENT_ERROR = "give exactly one of run_id or experiment_slug, not both/neither"
 
 #: register_artifact accepts arbitrary caller-supplied `meta` (e.g. linking
 #: a checkpoint that already lives in another project's bucket, with that

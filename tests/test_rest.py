@@ -1,6 +1,6 @@
 """REST layer tests via an in-process ASGI transport (see conftest.api_client)
 — exercises real Starlette routing/param parsing/handler code against the
-disposable test Postgres, not just service.py directly. Focused on HTTP-
+disposable test Postgres, not just service/ directly. Focused on HTTP-
 specific behavior (auth gating, status codes, param parsing, JSON shape);
 combinatorial business-logic edge cases are covered in test_service_*.py."""
 
@@ -465,6 +465,68 @@ async def test_register_artifact_accepts_hf_uri(api_client, write_key):
         headers=_auth(write_key),
     )
     assert resp.status_code == HTTPStatus.CREATED
+
+
+async def test_run_artifacts_git_builds_uri_server_side(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/git",
+        json={"owner": "chrishayuk", "repo": "chuk-mlx", "commit": "abc123", "name": "harness"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["uri"] == "git+https://github.com/chrishayuk/chuk-mlx@abc123"
+    assert body["meta"]["git_repo"] == "chrishayuk/chuk-mlx"
+    assert body["run_id"] == run_id
+
+
+async def test_experiment_artifacts_git_registers_against_experiment(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    resp = await api_client.post(
+        "/v1/experiments/cn-7/artifacts/git",
+        json={"owner": "chrishayuk", "repo": "chuk-mlx", "commit": "abc123", "name": "prereg"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["run_id"] is None
+    assert body["experiment_id"] is not None
+
+
+async def test_run_artifacts_hf_builds_uri_server_side(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
+    resp = await api_client.post(
+        f"/v1/runs/{run_id}/artifacts/hf",
+        json={
+            "repo_id": "chrishayuk/granite-4.1-3b-q4k-vindex",
+            "revision": "main",
+            "repo_type": "model",
+            "kind": "checkpoint",
+            "bytes": 4_230_000_000,
+        },
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["uri"] == "hf://model/chrishayuk/granite-4.1-3b-q4k-vindex@main"
+    assert body["meta"]["hf_repo_id"] == "chrishayuk/granite-4.1-3b-q4k-vindex"
+    assert body["bytes"] == 4_230_000_000
+
+
+async def test_experiment_artifacts_hf_registers_against_experiment(api_client, write_key):
+    await _create_experiment(api_client, write_key)
+    resp = await api_client.post(
+        "/v1/experiments/cn-7/artifacts/hf",
+        json={"repo_id": "chrishayuk/granite-4.1-3b-q4k-vindex"},
+        headers=_auth(write_key),
+    )
+    assert resp.status_code == HTTPStatus.CREATED
+    body = resp.json()
+    assert body["run_id"] is None
+    assert body["experiment_id"] is not None
 
 
 def _mock_verify(monkeypatch, status="verified", detail="ok"):
@@ -953,7 +1015,7 @@ async def test_artifacts_upload_rejects_oversized_content(api_client, write_key,
     # this is the small hard cap on the base64/MCP-argument routes
     # specifically, since that content is a literal tool-call argument that
     # lands in the calling model's own transcript regardless of outcome.
-    monkeypatch.setattr(rest, "_MAX_INLINE_BASE64_BYTES", 4)
+    monkeypatch.setattr(rest.artifacts, "MAX_INLINE_BASE64_BYTES", 4)
     await _create_experiment(api_client, write_key)
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
@@ -970,7 +1032,7 @@ async def test_artifacts_upload_batch_rejects_oversized_content(api_client, writ
     from chuk_experiments_server.config import settings
 
     monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
-    monkeypatch.setattr(rest, "_MAX_INLINE_BASE64_BYTES", 4)
+    monkeypatch.setattr(rest.artifacts, "MAX_INLINE_BASE64_BYTES", 4)
     await _create_experiment(api_client, write_key)
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(
@@ -1075,7 +1137,7 @@ async def test_artifacts_upload_raw_rejects_oversized_content(api_client, write_
     from chuk_experiments_server.config import settings
 
     monkeypatch.setattr(type(settings), "google_drive_configured", property(lambda self: True))
-    monkeypatch.setattr(rest, "_MAX_UPLOAD_BYTES", 4)
+    monkeypatch.setattr(rest.artifacts, "_MAX_UPLOAD_BYTES", 4)
     await _create_experiment(api_client, write_key)
     run_id = (await _enqueue_run(api_client, write_key)).json()["id"]
     resp = await api_client.post(

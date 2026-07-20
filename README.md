@@ -5,7 +5,7 @@ experiment's write-up, every run's config/results, and pointers to whatever
 artifacts (checkpoints, logs, datasets, harness code) it produced or used.
 Three kinds of client read and write it — a human via a dashboard, an agent
 via MCP, a training harness reporting run lifecycle — and all three go
-through the same REST API over HTTP, never `service.py` directly, so there
+through the same REST API over HTTP, never `service/` directly, so there
 is exactly one auth/validation path regardless of who's calling.
 
 **Live at** https://chuk-experiments-server.fly.dev (Fly.io, scale-to-zero,
@@ -101,7 +101,7 @@ Neon Postgres). Source: https://github.com/chrishayuk/chuk-experiments-server.
   `ChukMCPServer` instance and share one service layer. MCP tools are a thin
   forwarding layer that calls this server's own REST API over real loopback
   HTTP with the calling agent's bearer token — not a shortcut into
-  `service.py` — so an MCP client and a `curl` request hit identical
+  `service/` — so an MCP client and a `curl` request hit identical
   validation and auth.
 
 `experiment.id`/`run.id` are sortable strings, not serial integers or UUIDs:
@@ -139,17 +139,23 @@ src/chuk_experiments_server/
   db.py               asyncpg pool + migration runner
   auth.py             bearer API key auth, scope checks (REST/MCP clients)
   webauth.py          Google sign-in for the dashboard (browser sessions)
-  service.py          business logic — the only thing that talks to Postgres
+  service/            business logic — the only thing that talks to Postgres. Split by
+                       domain (programmes/experiments/runs/results/artifacts/users), with
+                       __init__.py re-exporting the full public surface so every caller
+                       still reaches it via `service.<name>`, unchanged
   errors.py           exception -> (status, json body) mapping
   serialization.py    Pydantic model -> plain JSON
   server.py           the shared ChukMCPServer instance
-  rest.py             REST endpoints (spec §4), registered onto `mcp`
-  tools.py            MCP tools (spec §5) — thin forwarding layer over this
-                       server's own REST API (internal_client.py), using the
-                       calling agent's own bearer token
-  internal_client.py  loopback httpx client tools.py forwards through (MCP-to-REST only —
+  rest/               REST endpoints (spec §4), registered onto `mcp` — same domain split
+                       as service/
+  tools/              MCP tools (spec §5) — thin forwarding layer over this server's own
+                       REST API (internal_client.py), using the calling agent's own bearer
+                       token; same domain split as service/ (no `users` submodule — no MCP
+                       tool wraps dashboard user/key/token self-service)
+  internal_client.py  loopback httpx client tools/ forwards through (MCP-to-REST only —
                        the dashboard SPA calls /v1/* directly from the browser, no proxy)
-  web.py              OAuth flow (/login, /auth/callback) + the one SPA-shell route (/)
+  web.py              OAuth flow (/login, /auth/callback), the SPA-shell route (/), and
+                       the /static/{filename} route serving static/*.js
   markdown_render.py  write-up body_md -> sanitized HTML, computed server-side so the
                        SPA never needs its own markdown parser
   storage.py          R2 presigned upload/download
@@ -157,7 +163,10 @@ src/chuk_experiments_server/
                        route and the archive_*_to_drive.py scripts
   external_refs.py    git+/hf:// artifact reference URI build/parse + real verification
                        against GitHub's/Hugging Face's REST APIs
-  templates/          app.html (the SPA shell — CSS + vanilla JS, no build step) + login.html
+  templates/          app.html (the SPA shell — CSS + a small inline <script> of
+                       server-injected constants, no build step) + login.html
+  static/             app.html's JS, split one file per dashboard screen plus shared
+                       utilities/router, loaded via plain <script src> (see web.py)
   cli.py              `chuk-experiments-server migrate|serve|keys create|sweep`
 migrations/
   001_init.sql              schema: programme/experiment/writeup/run/result/artifact/api_key
@@ -166,6 +175,11 @@ migrations/
   004_artifact_lineage.sql  artifact gets name/role; artifact_pin table (dedup + lineage + pins)
   005_artifact_produced_unique.sql  unique index on (name, sha256) where role='produced' (dedup race fix)
   006_artifact_verify.sql   artifact gets verify_status/verified_at/verify_detail (git+/hf:// verification)
+  007_user_tokens.sql       app_user gets encrypted per-user GitHub/HF tokens (verify_artifact rate limits)
+  008_artifact_uri_dedup.sql  (name, uri) dedup/lineage index for git+/hf:// refs (no sha256 to key on)
+  009_experiment_conclusion_next_action.sql  experiment gets conclusion/next_action columns (what was learned, what's next)
+  010_result_superseded.sql  result gets superseded_by — corrections stay linked, not just prose
+  011_experiment_artifacts.sql  artifact gets an optional experiment_id parent (pre-run provenance)
 scripts/
   migrate_chris_experiments.py          ../chris-experiments/INDEX.md (155 experiments, 8 programmes)
   migrate_chuk_mlx.py                    ../chuk-mlx/experiments/ (31, no central index — per-dir EXPERIMENT.md)
@@ -173,7 +187,11 @@ scripts/
   migrate_larql_aim_validation.py        ../larql/bench/aim-validation/*.json (3 — rest has no shared contract)
   archive_chuk_mlx_to_drive.py           chuk-mlx/experiments/ -> Google Drive (done, verified, local copy reclaimed)
   archive_chris_experiments_to_drive.py  chris-experiments/ -> Google Drive (done, verified, local copy reclaimed)
+  audit_artifacts_for_git_refs.py        finds artifacts that could be git+/hf:// references instead of byte
+                                          uploads — hashes real local git repos + does a real HF file/size diff
+                                          (not name-matching); read-only unless given --apply-ids
   _drive_common.py                       shared OAuth/upload/manifest helpers for the archive_* scripts
+  _migrate_common.py                     shared HTTP/experiment-creation helpers for the migrate_* scripts
   verify_harness_contract.py             E2E smoke test of the spec §6/§6a queue contract against a live server
 .github/workflows/
   ci.yml       lint + test on every push/PR; continuous deploy to Fly on push to main

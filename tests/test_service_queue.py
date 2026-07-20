@@ -11,6 +11,32 @@ async def _make_experiment(slug: str = "cn-7") -> None:
     await service.create_experiment(ExperimentCreate(programme="cn", slug=slug, title="t"))
 
 
+# _pack_runs_by_session_budget is a pure function (no DB) — test it directly
+# rather than only indirectly through claim_queue's transaction/locking.
+
+
+def test_pack_runs_by_session_budget_fills_greedily_by_given_order():
+    packed = service._pack_runs_by_session_budget([("a", 100), ("b", 50), ("c", 200)], session_seconds=150)
+    assert packed == ["a", "b"]  # a fits (100/150 left), b fits (50/50 left), c doesn't
+
+
+def test_pack_runs_by_session_budget_skips_too_big_but_keeps_scanning():
+    packed = service._pack_runs_by_session_budget([("too_big", 500), ("fits", 50)], session_seconds=100)
+    assert packed == ["fits"]
+
+
+def test_pack_runs_by_session_budget_treats_missing_estimate_as_zero_cost():
+    # session_seconds=10 (not 0) so the loop's "remaining<=0" break doesn't
+    # fire after the first zero-cost claim — this isolates "None means 0
+    # cost, not skipped" from that separate edge case.
+    packed = service._pack_runs_by_session_budget([("a", None), ("b", None)], session_seconds=10)
+    assert packed == ["a", "b"]
+
+
+def test_pack_runs_by_session_budget_empty_candidates():
+    assert service._pack_runs_by_session_budget([], session_seconds=100) == []
+
+
 async def test_peek_queue_excludes_non_queued_runs():
     await _make_experiment()
     await service.enqueue_run(RunCreate(experiment="cn-7", slug="a", status=RunStatus.QUEUED))
