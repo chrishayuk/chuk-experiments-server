@@ -6,16 +6,45 @@ name: Backup
 # backup). BACKUP_DATABASE_URL is a separate secret from the app's own
 # DATABASE_URL (which only Fly holds) so this workflow doesn't need
 # production Fly access at all, just a direct Postgres connection string.
+#
+# Also runs hourly, for fine-grained recovery within the last day ("revert
+# to 2 hours ago" instead of "revert to last night") — kept under a
+# separate backups/hourly/ prefix from the daily backups/ ones, and pruned
+# to a rolling 24h window on every hourly run (rather than the daily job's
+# 30-day one), so hourly backups don't pile up into hundreds a month —
+# effectively "cleaned up by the end of each day" without a separate
+# midnight-cleanup job that would itself be a thing to forget/fail. One
+# job serves both schedules; which one a given run is comes from
+# github.event.schedule (or the `kind` input on a manual dispatch).
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 03:00 UTC daily
+    - cron: "0 3 * * *" # daily, 03:00 UTC
+    - cron: "0 * * * *" # hourly, on the hour
   workflow_dispatch:
+    inputs:
+      kind:
+        description: "Which backup to run"
+        required: false
+        default: daily
+        type: choice
+        options:
+          - daily
+          - hourly
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
+      - name: Determine backup kind
+        id: kind
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 * * * *" ]; then
+            echo "kind=hourly" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=${{ github.event.inputs.kind || 'daily' }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install PostgreSQL 18 client tools
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -28,6 +57,7 @@ jobs:
       - name: Dump database
         env:
           BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          KIND: ${{ steps.kind.outputs.kind }}
         run: |
           set -euo pipefail
           # The runner image already ships an older pg_dump on PATH (e.g.
@@ -38,6 +68,11 @@ jobs:
           backup_file="backup-${date_stamp}.sql.gz"
           /usr/lib/postgresql/18/bin/pg_dump "$BACKUP_DATABASE_URL" | gzip > "$backup_file"
           echo "BACKUP_FILE=$backup_file" >> "$GITHUB_ENV"
+          if [ "$KIND" = "hourly" ]; then
+            echo "BACKUP_PREFIX=backups/hourly" >> "$GITHUB_ENV"
+          else
+            echo "BACKUP_PREFIX=backups" >> "$GITHUB_ENV"
+          fi
 
       - name: Upload to R2
         env:
@@ -48,22 +83,35 @@ jobs:
           R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          aws s3 cp "$BACKUP_FILE" "s3://${R2_BUCKET}/backups/$BACKUP_FILE" \
+          aws s3 cp "$BACKUP_FILE" "s3://${R2_BUCKET}/${BACKUP_PREFIX}/$BACKUP_FILE" \
             --endpoint-url "$R2_ENDPOINT_URL"
 
-      - name: Prune backups older than 30 days
+      - name: Prune old backups
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          KIND: ${{ steps.kind.outputs.kind }}
         run: |
           set -euo pipefail
-          cutoff=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S)
-          keys=$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "backups/" \
+          if [ "$KIND" = "hourly" ]; then
+            prefix="backups/hourly/"
+            cutoff=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S)
+            query="Contents[?LastModified<='${cutoff}'].Key"
+          else
+            # Daily's own prefix is a parent of backups/hourly/, so exclude
+            # that subtree explicitly rather than relying on "hourly always
+            # self-prunes within 24h" to keep this 30-day sweep from ever
+            # touching it.
+            prefix="backups/"
+            cutoff=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%S)
+            query="Contents[?LastModified<='${cutoff}' && !contains(Key, '/hourly/')].Key"
+          fi
+          keys=$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --prefix "$prefix" \
             --endpoint-url "$R2_ENDPOINT_URL" \
-            --query "Contents[?LastModified<='${cutoff}'].Key" --output text)
+            --query "$query" --output text)
           if [ -n "$keys" ] && [ "$keys" != "None" ]; then
             echo "$keys" | tr '\t' '\n' | while read -r key; do
               [ -n "$key" ] && aws s3 rm "s3://${R2_BUCKET}/$key" --endpoint-url "$R2_ENDPOINT_URL"

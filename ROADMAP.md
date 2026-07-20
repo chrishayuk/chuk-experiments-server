@@ -50,11 +50,17 @@ decisions made along the way that the spec didn't originally cover.
   remaining admin. Confirmed live end-to-end: a real MCP client connection
   (`claude mcp add`) using a key minted through the dashboard by a real
   Google sign-in.
-- **Daily production backup** (`.github/workflows/backup.yml`) — Neon's
-  built-in point-in-time recovery is only a 6h rolling window on the free
-  plan this project is on, not a real backup. A scheduled job `pg_dump`s
-  production, gzips it, uploads to the existing R2 bucket under `backups/`,
-  and prunes anything older than 30 days.
+- **Daily + hourly production backup** (`.github/workflows/backup.yml`) —
+  Neon's built-in point-in-time recovery is only a 6h rolling window on the
+  free plan this project is on, not a real backup. A scheduled job
+  `pg_dump`s production, gzips it, uploads to the existing R2 bucket. Daily
+  (03:00 UTC) goes under `backups/`, pruned past 30 days. Hourly (2026-07-21,
+  added for finer-grained recovery — "revert to 2 hours ago" instead of
+  "revert to last night") goes under `backups/hourly/`, pruned on a rolling
+  24h window on every run rather than a separate end-of-day cleanup job —
+  self-limiting rather than something that can itself be forgotten/fail to
+  run. One workflow serves both schedules, distinguished at runtime via
+  `github.event.schedule` (or the `kind` input on a manual dispatch).
 - **REST-API-only architecture** — MCP tools (`tools/`) call this server's
   own REST API over real HTTP (`internal_client.py`, a loopback `httpx`
   client), forwarding the calling agent's own bearer token, never

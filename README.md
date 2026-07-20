@@ -200,7 +200,9 @@ scripts/
                apply automatically as part of that deploy — see fly.toml's release_command), then a
                read-only smoke test (scripts/smoke_test.py) against production as a second line of
                defense in case schema and deployed code ever disagree for some other reason
-  backup.yml   daily pg_dump of production -> gzipped, uploaded to R2, 30-day rotation
+  backup.yml   daily pg_dump of production -> gzipped, uploaded to R2 under backups/, 30-day
+               rotation; plus an hourly one under backups/hourly/, rolling 24h window, for
+               finer recovery granularity within the last day without piling up long-term
 ```
 
 ## Local development
@@ -272,11 +274,14 @@ fly deploy --app <name>
 # then, once: DATABASE_URL=<neon-url> chuk-experiments-server migrate
 ```
 
-Production is backed up daily (`.github/workflows/backup.yml`) — Neon's own
-point-in-time recovery window is only 6h on the free plan this project is
-on, which isn't a real backup, so a scheduled job dumps the DB and uploads
-it (gzipped) to the R2 bucket under `backups/`, pruning anything older than
-30 days.
+Production is backed up daily and hourly (`.github/workflows/backup.yml`)
+— Neon's own point-in-time recovery window is only 6h on the free plan
+this project is on, which isn't a real backup, so a scheduled job dumps
+the DB and uploads it (gzipped) to the R2 bucket. The daily dump lands
+under `backups/`, pruned at 30 days; the hourly one lands under
+`backups/hourly/`, pruned on a rolling 24h window — cheap fine-grained
+recovery within the last day (without a separate midnight-cleanup job) on
+top of the daily's longer retention.
 
 Note the Dockerfile installs `uv` by copying the binary from
 `ghcr.io/astral-sh/uv` (Astral's documented Docker pattern) rather than the
